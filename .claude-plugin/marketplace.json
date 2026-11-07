@@ -1,0 +1,5 @@
+{
+  "name": "cc-cache-expiry-handoff",
+  "owner": { "name": "Ossian Ravn" },
+  "plugins": [{ "name": "cache-expiry-handoff", "source": "./" }]
+}
