@@ -85,7 +85,7 @@ const STORED: Record<string, unknown> = {
 test('the band shows the countdown on terminal and desktop', async ($, on) => {
   on('state.get', (_, e) => {
     const key = (e as { key: string }).key
-    return key in STORED ? { value: { value: STORED[key], version: 1 } } : { value: { version: 0 } }
+    return key in STORED ? { value: { value: STORED[key], version: 1 } } : { value: { value: undefined, version: 0 } }
   })
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...BAND, surface })
@@ -125,7 +125,7 @@ test('the settings pane draws every mode on terminal and desktop', async ($, on)
     const key = (e as { key: string }).key
     if (key === 'settings') return { value: { value: { shape: 'settings-1', value: { ...DEFAULT_SETTINGS, mode } }, version: 1 } }
     if (key === 'skills') return { value: { value: ['handoff', 'smart-handoff'], version: 1 } }
-    return key in STORED ? { value: { value: STORED[key], version: 1 } } : { value: { version: 0 } }
+    return key in STORED ? { value: { value: STORED[key], version: 1 } } : { value: { value: undefined, version: 0 } }
   })
   for (const m of ['notify', 'warm', 'handoff', 'warm-handoff']) {
     mode = m

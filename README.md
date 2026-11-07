@@ -24,16 +24,16 @@ A Claude Code mod that shows how long your prompt cache has left and acts before
 
 ## Settings
 
-Run `/cache`, or press **Settings** on the band, to open the settings pane: the action, when it runs, the keep-warm budget, the handoff skill and its instructions, the size floor, the cache lifetime and alerts. It also has **Warm now**, **Run /handoff** and **Pause** buttons, and a log of what the mod did. Settings are saved across sessions.
+Run `/cache-expiry`, or press **Settings** on the band, to open the settings pane: the action, when it runs, the keep-warm budget, the handoff skill and its instructions, the size floor, the cache lifetime and alerts. It also has **Warm now**, **Run /handoff** and **Pause** buttons, and a log of what the mod did. Settings are saved across sessions.
 
 | Command | Does |
 | --- | --- |
-| `/cache` | Opens the settings pane. |
-| `/cache warm` | Keeps the cache warm now. |
-| `/cache handoff` | Runs the handoff skill now. |
-| `/cache mode <notify\|warm\|handoff\|warm-handoff>` | Sets the action. |
-| `/cache pause`, `/cache resume` | Pauses or resumes actions for this session. |
-| `/cache status` | Prints the cache state. |
+| `/cache-expiry` | Opens the settings pane. |
+| `/cache-expiry warm` | Keeps the cache warm now. |
+| `/cache-expiry handoff` | Runs the handoff skill now. |
+| `/cache-expiry mode <notify\|warm\|handoff\|warm-handoff>` | Sets the action. |
+| `/cache-expiry pause`, `/cache-expiry resume` | Pauses or resumes actions for this session. |
+| `/cache-expiry status` | Prints the cache state. |
 
 ## Costs
 

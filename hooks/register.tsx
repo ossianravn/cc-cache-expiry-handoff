@@ -32,7 +32,7 @@ import type { ExplicitTtl } from './logic'
 type $ = EngineInterface
 
 const PANE = 'cache'
-const COMMAND = 'cache'
+const COMMAND = 'cache-expiry'
 
 const settingsA = atom({ plugin: 'cache-expiry-handoff', key: 'settings' } as const, DEFAULT_SETTINGS, {
   shape: 'settings-1',
@@ -50,6 +50,36 @@ const patchRun = ($: $, patch: Partial<CacheRun>) => update($, runA, r => ({ ...
 async function log($: $, kind: CacheLogKind, text: string) {
   const at = await $.clock.now()
   await update($, logA, list => pushLog(list, { at, kind, text }))
+}
+
+// The snapshot is also kept in the store under the session id, so a reload or a
+// resumed session starts from the last request instead of an empty band.
+let sessionId = ''
+
+async function setSnap($: $, change: (v: CacheSnapshot) => CacheSnapshot) {
+  const next = await update($, snapA, change)
+  if (!sessionId) return
+  const saved = await $.store.get('snaps')
+  const all: Record<string, CacheSnapshot> =
+    saved !== null && typeof saved === 'object' ? { ...(saved as Record<string, CacheSnapshot>) } : {}
+  if (next.lastAt === 0) delete all[sessionId]
+  else all[sessionId] = next
+  const kept = Object.entries(all)
+    .sort((a, b) => b[1].lastAt - a[1].lastAt)
+    .slice(0, 30)
+  await $.store.set('snaps', Object.fromEntries(kept))
+}
+
+async function restoreSnap($: $): Promise<boolean> {
+  const cur = await read($, snapA)
+  if (cur.lastAt > 0 || !sessionId) return cur.lastAt > 0
+  const saved = await $.store.get('snaps')
+  const one = saved !== null && typeof saved === 'object' ? (saved as Record<string, unknown>)[sessionId] : undefined
+  if (one === null || typeof one !== 'object') return false
+  const snap = { ...EMPTY_SNAP, ...(one as Partial<CacheSnapshot>) }
+  if (typeof snap.lastAt !== 'number' || snap.lastAt <= 0) return false
+  await update($, snapA, () => snap)
+  return true
 }
 
 async function setSettings($: $, patch: Partial<CacheSettings>) {
@@ -83,7 +113,7 @@ async function warmNow($: $, s: CacheSettings) {
     const at = await $.clock.now()
     if (r.isAnswered && r.usage.cache_read_input_tokens > 0) {
       const readTokens = r.usage.cache_read_input_tokens
-      await update($, snapA, v => ({ ...v, lastAt: at }))
+      await setSnap($, v => ({ ...v, lastAt: at }))
       await update($, runA, (v): CacheRun => ({ ...v, pings: v.pings + 1, pingRead: v.pingRead + readTokens, phase: 'warming' }))
       const wrote = r.usage.cache_creation_input_tokens
       await log($, 'warm', `Kept warm · read ${fmtTokens(readTokens)}${wrote > 1000 ? ` · wrote ${fmtTokens(wrote)}` : ''}`)
@@ -155,7 +185,8 @@ let explicit: ExplicitTtl
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
-    await update($, settingsA, () => normalizeSettings(undefined))
+    sessionId = await $.session.id()
+    const restored = await restoreSnap($)
     const stored = await $.store.get('settings')
     await update($, settingsA, () => normalizeSettings(stored))
     explicit = explicitTtl({
@@ -176,7 +207,7 @@ export const register: Register = on => {
 
   on('session.end', async ($, e, next) => {
     if (e.reason === 'clear') {
-      await update($, snapA, () => EMPTY_SNAP)
+      await setSnap($, () => EMPTY_SNAP)
       await update($, runA, r => ({ ...IDLE_RUN, paused: r.paused }))
     }
     return next(e)
@@ -200,7 +231,7 @@ export const register: Register = on => {
       if (prev.lastAt > 0 && (ttl.ms !== prev.autoTtlMs || ttl.source !== prev.autoTtlSource)) {
         await log($, 'ttl', `Cache lifetime: ${fmtTtl(ttl.ms)} (${ttl.source})`)
       }
-      await update($, snapA, () => ({ lastAt: now, ...usage, autoTtlMs: ttl.ms, autoTtlSource: ttl.source }))
+      await setSnap($, () => ({ lastAt: now, ...usage, autoTtlMs: ttl.ms, autoTtlSource: ttl.source }))
       await update($, nowA, () => now)
     }
     return result
@@ -250,7 +281,7 @@ export const register: Register = on => {
         await $.ui.open({ id: PANE, title: 'Prompt cache', focus: true, closeOnEscape: true })
         return { text: await statusText($) }
       case 'warm':
-        return { text: (await warmNow($, s)) ? 'Kept the prompt cache warm.' : 'Keep-warm failed; see /cache.' }
+        return { text: (await warmNow($, s)) ? 'Kept the prompt cache warm.' : 'Keep-warm failed; see /cache-expiry.' }
       case 'handoff':
         await handOffNow($, s)
         return { text: `Ran /${s.skill}.` }
@@ -269,7 +300,7 @@ export const register: Register = on => {
       case 'status':
         return { text: await statusText($) }
       default:
-        return { text: 'Usage: /cache [warm | handoff | pause | resume | status | mode <notify|warm|handoff|warm-handoff>]' }
+        return { text: 'Usage: /cache-expiry [warm | handoff | pause | resume | status | mode <notify|warm|handoff|warm-handoff>]' }
     }
   })
 
@@ -310,18 +341,28 @@ export const register: Register = on => {
         </Text>
       )
 
+    // The label, bar and time keep their size; only the details shrink, then truncate.
     return (
       <Box flexDirection="row" gap={1} alignItems="center">
-        <Text color={tone}>●</Text>
-        <Text weight="semibold">Cache</Text>
-        {bar}
-        <Text tabular color={isCold ? 'error' : undefined}>{time}</Text>
-        <Text dimColor wrap="truncate-end">
-          {meta}
-          {plan ? ` · ${plan}` : ''}
-        </Text>
-        <Box flexGrow={1} />
-        <Button key="open" label="Settings" dimColor onPress={() => openPane($)} />
+        <Box flexDirection="row" gap={1} flexShrink={0} alignItems="center">
+          <Text color={tone}>●</Text>
+          <Text weight="semibold">Cache</Text>
+          <Box flexShrink={0} width={e.surface === 'terminal' ? 12 : undefined}>
+            {bar}
+          </Box>
+          <Text tabular color={isCold ? 'error' : undefined} wrap="truncate-end">
+            {time}
+          </Text>
+        </Box>
+        <Box flexGrow={1} flexShrink={1} minWidth={0}>
+          <Text dimColor wrap="truncate-end">
+            {meta}
+            {plan ? ` · ${plan}` : ''}
+          </Text>
+        </Box>
+        <Box flexShrink={0}>
+          <Button key="open" label="Settings" dimColor onPress={() => openPane($)} />
+        </Box>
       </Box>
     )
   })
@@ -364,7 +405,7 @@ export const register: Register = on => {
       )
     const row = (label: string, control: RenderChildren, hint?: string) => (
       <Box flexDirection="row" gap={2}>
-        <Box width={16} flexShrink={0}>
+        <Box width={18} flexShrink={0}>
           <Text dimColor>{label}</Text>
         </Box>
         <Box flexDirection="column" flexShrink={1} gap={0}>
@@ -480,12 +521,12 @@ export const register: Register = on => {
           )}
           {row('Toasts', onOff('toast', s.toast, 'toast'))}
           {row('System alerts', onOff('system', s.systemNotify, 'systemNotify'))}
-          {row('Ask before cold send', onOff('guard', s.guard, 'guard'))}
+          {row('Confirm cold send', onOff('guard', s.guard, 'guard'))}
         </Box>
 
         <Box flexDirection="row" flexWrap="wrap" gap={1}>
           <Button key="warm-now" label="Warm now" onPress={() => void warmNow($, s)} />
-          <Button key="handoff-now" label={`CacheRun /${s.skill}`} onPress={() => void handOffNow($, s)} />
+          <Button key="handoff-now" label={`Run /${s.skill}`} onPress={() => void handOffNow($, s)} />
           <Button
             key="pause"
             label={run.paused ? 'Resume' : 'Pause'}
