@@ -106,7 +106,7 @@ async function refreshSkills($: $) {
 
 // ---------- actions ----------
 
-async function warmNow($: $, s: CacheSettings) {
+async function warmNow($: $, s: CacheSettings, isManual = false) {
   await patchRun($, { isActing: true })
   try {
     const r = await $.model.fork({ prompt: PING_PROMPT })
@@ -117,6 +117,7 @@ async function warmNow($: $, s: CacheSettings) {
       await update($, runA, (v): CacheRun => ({ ...v, pings: v.pings + 1, pingRead: v.pingRead + readTokens, phase: 'warming' }))
       const wrote = r.usage.cache_creation_input_tokens
       await log($, 'warm', `Kept warm · read ${fmtTokens(readTokens)}${wrote > 1000 ? ` · wrote ${fmtTokens(wrote)}` : ''}`)
+      if (isManual) $.ui.toast(`Cache kept warm: ${fmtTokens(readTokens)} tokens, timer reset`)
       return true
     }
     const why = r.isAnswered ? 'the cache had already lapsed' : r.reason.replace(/-/g, ' ')
@@ -209,6 +210,7 @@ export const register: Register = on => {
     if (e.reason === 'clear') {
       await setSnap($, () => EMPTY_SNAP)
       await update($, runA, r => ({ ...IDLE_RUN, paused: r.paused }))
+      await update($, logA, () => [])
     }
     return next(e)
   })
@@ -278,10 +280,10 @@ export const register: Register = on => {
       case '':
       case 'settings':
         await refreshSkills($)
-        await $.ui.open({ id: PANE, title: 'Prompt cache', focus: true, closeOnEscape: true })
+        await $.ui.open({ id: PANE, title: 'Prompt cache', focus: true, closeOnEscape: true, rows: 30, columns: 64 })
         return { text: await statusText($) }
       case 'warm':
-        return { text: (await warmNow($, s)) ? 'Kept the prompt cache warm.' : 'Keep-warm failed; see /cache-expiry.' }
+        return { text: (await warmNow($, s, true)) ? 'Kept the prompt cache warm.' : 'Keep-warm failed; see /cache-expiry.' }
       case 'handoff':
         await handOffNow($, s)
         return { text: `Ran /${s.skill}.` }
@@ -393,7 +395,7 @@ export const register: Register = on => {
     const set = (patch: Partial<CacheSettings>) => () => void setSettings($, patch)
 
     const segmented = <T extends string>(key: string, options: readonly { value: T; label: string }[], value: T, pick: (v: T) => void) => (
-      <Box flexDirection="row" flexWrap="wrap" gap={1}>
+      <Box flexDirection="row" flexWrap="wrap" columnGap={1} rowGap={0}>
         {options.map(o => (
           <Button key={`${key}:${o.value}`} label={o.label} variant={o.value === value ? 'primary' : 'secondary'} onPress={() => pick(o.value)} />
         ))}
@@ -432,7 +434,10 @@ export const register: Register = on => {
     if (!warmOptions.some(o => o.value === String(s.warmForMin))) warmOptions.push({ value: String(s.warmForMin), label: fmtDuration(s.warmForMin * 60) })
     const minOptions = [0, 10_000, 20_000, 50_000, 100_000].map(v => ({ value: String(v), label: v === 0 ? 'Any size' : `${fmtTokens(v)} tokens` }))
     if (!minOptions.some(o => o.value === String(s.minTokens))) minOptions.push({ value: String(s.minTokens), label: `${fmtTokens(s.minTokens)} tokens` })
-    const skillOptions = (skills.includes(s.skill) ? skills : [s.skill, ...skills]).map(n => ({
+    // A Select takes at most 64 options: handoff-like skills rank first, and the chosen one always stays.
+    const shown = skills.slice(0, 64)
+    const skillNames = shown.includes(s.skill) ? shown : [s.skill, ...shown.slice(0, 63)]
+    const skillOptions = skillNames.map(n => ({
       value: n,
       label: `/${n}${skills.length > 0 && !skills.includes(n) ? ' (not found)' : ''}`,
     }))
@@ -454,6 +459,10 @@ export const register: Register = on => {
           : `${fmtClock(left)} left`
     const tone = !hasData ? 'subtle' : isLive ? 'success' : left <= 0 ? 'error' : left <= lead ? 'warning' : 'success'
 
+    // Terminal rows sit tight so the pane fits inline above the prompt; graphical surfaces get air.
+    const rowGap = e.surface === 'terminal' ? 0 : 1
+    const warmLabel = run.isActing ? 'Working…' : 'Warm now'
+
     return (
       <Box flexDirection="column" gap={1} width={width}>
         <Box flexDirection="column">
@@ -464,18 +473,43 @@ export const register: Register = on => {
             </Text>
           </Box>
           {hasData ? (
-            <Text dimColor>
+            <Text dimColor wrap="truncate-end">
               {fmtTtl(ttl)} cache ({ttlSource(s, snap)}) · {Math.round(hitRate(snap) * 100)}% hit · {fmtTokens(prefixTokens(snap))} tokens
             </Text>
           ) : null}
           {hasData ? (
-            <Text dimColor>
+            <Text dimColor wrap="truncate-end">
               Last reply {fmtAgo(now - snap.lastAt)} · {planText(s, run, lead) || 'nothing scheduled'}
             </Text>
           ) : null}
         </Box>
 
-        <Box flexDirection="column" gap={1}>
+        <Box flexDirection="column" gap={0}>
+          <Box flexDirection="row" flexWrap="wrap" gap={1}>
+            {hasData ? <Button key="warm-now" label={warmLabel} variant="primary" onPress={() => void warmNow($, s, true)} /> : null}
+            <Button key="handoff-now" label={`Run /${s.skill}`} onPress={() => void handOffNow($, s)} />
+            <Button key="pause" label={run.paused ? 'Resume' : 'Pause'} onPress={() => void patchRun($, { paused: !run.paused })} />
+          </Box>
+          {logs.slice(0, 3).map((l: CacheLogEntry, i: number) => (
+            <Box flexDirection="row" gap={2}>
+              <Box width={9} flexShrink={0}>
+                <Text dimColor tabular>
+                  {fmtAgo(now - l.at)}
+                </Text>
+              </Box>
+              <Text color={l.kind === 'error' ? 'error' : undefined} dimColor={i > 0} wrap="truncate-end">
+                {l.text}
+              </Text>
+            </Box>
+          ))}
+          {run.pings > 0 ? (
+            <Text dimColor wrap="truncate-end">
+              Kept warm {run.pings}× · {fmtTokens(run.pingRead)} cached tokens read ≈ {fmtTokens(Math.round(run.pingRead / 10))} at full price
+            </Text>
+          ) : null}
+        </Box>
+
+        <Box flexDirection="column" gap={rowGap}>
           <Text weight="semibold">Before it expires</Text>
           {row('Action', segmented('mode', MODES, s.mode, (v: CacheMode) => void setSettings($, { mode: v })))}
           {row(
@@ -512,7 +546,7 @@ export const register: Register = on => {
             : null}
         </Box>
 
-        <Box flexDirection="column" gap={1}>
+        <Box flexDirection="column" gap={rowGap}>
           <Text weight="semibold">Cache</Text>
           {row(
             'Lifetime',
@@ -523,41 +557,6 @@ export const register: Register = on => {
           {row('System alerts', onOff('system', s.systemNotify, 'systemNotify'))}
           {row('Confirm cold send', onOff('guard', s.guard, 'guard'))}
         </Box>
-
-        <Box flexDirection="row" flexWrap="wrap" gap={1}>
-          <Button key="warm-now" label="Warm now" onPress={() => void warmNow($, s)} />
-          <Button key="handoff-now" label={`Run /${s.skill}`} onPress={() => void handOffNow($, s)} />
-          <Button
-            key="pause"
-            label={run.paused ? 'Resume' : 'Pause'}
-            onPress={() => void patchRun($, { paused: !run.paused })}
-          />
-        </Box>
-
-        {run.pings > 0 ? (
-          <Text dimColor>
-            {run.pings} keep-warm {run.pings === 1 ? 'ping' : 'pings'} read {fmtTokens(run.pingRead)} cached tokens, about the cost of{' '}
-            {fmtTokens(Math.round(run.pingRead / 10))} uncached.
-          </Text>
-        ) : null}
-
-        {logs.length > 0 ? (
-          <Box flexDirection="column">
-            <Text weight="semibold">Activity</Text>
-            {logs.slice(0, 8).map((l: CacheLogEntry) => (
-              <Box flexDirection="row" gap={2}>
-                <Box width={9} flexShrink={0}>
-                  <Text dimColor tabular>
-                    {fmtAgo(now - l.at)}
-                  </Text>
-                </Box>
-                <Text color={l.kind === 'error' ? 'error' : undefined} wrap="truncate-end">
-                  {l.text}
-                </Text>
-              </Box>
-            ))}
-          </Box>
-        ) : null}
       </Box>
     )
   })
@@ -567,7 +566,7 @@ export const register: Register = on => {
 
 async function openPane($: $) {
   await refreshSkills($)
-  await $.ui.open({ id: PANE, title: 'Prompt cache', focus: true, closeOnEscape: true })
+  await $.ui.open({ id: PANE, title: 'Prompt cache', focus: true, closeOnEscape: true, rows: 30, columns: 64 })
 }
 
 function planText(s: CacheSettings, run: CacheRun, lead: number): string {

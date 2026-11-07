@@ -124,7 +124,7 @@ test('the settings pane draws every mode on terminal and desktop', async ($, on)
   on('state.get', (_, e) => {
     const key = (e as { key: string }).key
     if (key === 'settings') return { value: { value: { shape: 'settings-1', value: { ...DEFAULT_SETTINGS, mode } }, version: 1 } }
-    if (key === 'skills') return { value: { value: ['handoff', 'smart-handoff'], version: 1 } }
+    if (key === 'skills') return { value: { value: ['handoff', 'smart-handoff', ...Array.from({ length: 120 }, (_, i) => `skill-${i}`)], version: 1 } }
     return key in STORED ? { value: { value: STORED[key], version: 1 } } : { value: { value: undefined, version: 0 } }
   })
   for (const m of ['notify', 'warm', 'handoff', 'warm-handoff']) {
