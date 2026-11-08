@@ -253,6 +253,16 @@ export const register: Register = on => {
     return next(e)
   })
 
+  // `/clear` starts a new session with fresh state but no `session.start`: load the saved settings again.
+  on('classic.SessionStart', async ($, e, next) => {
+    if (e.source === 'clear') {
+      sessionId = await $.session.id()
+      const stored = await $.store.get('settings')
+      await update($, settingsA, () => normalizeSettings(stored))
+    }
+    return next(e)
+  })
+
   on('session.end', async ($, e, next) => {
     if (e.reason === 'clear') {
       await setSnap($, () => EMPTY_SNAP)

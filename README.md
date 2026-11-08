@@ -2,8 +2,14 @@
 
 A Claude Code mod that shows how long your prompt cache has left and acts before it expires. It can notify you, keep the cache warm, or run your own handoff skill so a fresh session can pick up the work.
 
+![The cache band above the prompt in Claude Code Desktop](docs/band-dark.png)
+
+<img src="docs/pane-dark.png" alt="The Prompt cache settings pane" width="370">
+
+In the terminal the band draws as text:
+
 ```
-● Cache ████████░░░░  3:41  1h · 96% hit · 151k cached · warms at 1:00     Settings
+● Cache ████████░░░░ 3:41 1h · 96% hit · 151k cached · warms at 1:00 [ Settings ]
 ```
 
 ## What it does
