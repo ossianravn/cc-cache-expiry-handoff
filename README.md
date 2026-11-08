@@ -18,13 +18,15 @@ A Claude Code mod that shows how long your prompt cache has left and acts before
   | Hand off | Runs your skill or slash command (default `/handoff`) with the instructions you set, as if you had typed it. |
   | Keep warm, then hand off | Keeps the cache warm for the idle budget, then runs the handoff skill (Keep warm with **Then: Hand off**). |
 
+  With a handoff action, **Afterwards: Clear** runs `/clear` once the handoff skill's turn finishes, so your next prompt starts a fresh session from the handoff instead of rewriting the old cache. An interrupted handoff leaves the session as it is.
+
   Each action runs once per idle stretch: your next message re-arms it. Contexts below a size you choose get a notification instead of a keep-warm or handoff.
 - **Cold send: Ask first** (off by default). When the cache has expired, the mod asks before a message rewrites a large prompt, and can hold the message so you can `/compact` or `/clear` first.
 - **Cache lifetime detection.** Set it to 5 minutes or 1 hour, or leave it on Auto. Auto reads `FORCE_PROMPT_CACHING_5M`, `CLAUDE_CODE_PROMPT_CACHE_TTL`, the `promptCacheTtl` setting and `ENABLE_PROMPT_CACHING_1H` first. Without those it treats a Claude account sign-in as 1 hour and an API key, Bedrock, Vertex or Foundry as 5 minutes, and corrects itself from traffic: a cache hit after more than five idle minutes proves a 1-hour cache.
 
 ## Settings
 
-Run `/cache-expiry`, or press **Settings** on the band, to open the settings pane: the action, when it runs, the keep-warm budget, the handoff skill and its instructions, the size floor, the cache lifetime and alerts. It also has **Warm now**, **Run /handoff** and **Pause** buttons, and a log of what the mod did. Settings are saved across sessions.
+Run `/cache-expiry`, or press **Settings** on the band, to open the settings pane: the action, when it runs, the keep-warm budget, the handoff skill, its instructions and what happens afterwards, the size floor, the cache lifetime and alerts. It also has **Warm now**, **Run /handoff** and **Pause** buttons, and a log of what the mod did. Settings are saved across sessions.
 
 | Command | Does |
 | --- | --- |

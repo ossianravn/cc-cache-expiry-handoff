@@ -23,6 +23,8 @@ export type CacheSettings = {
   systemNotify: boolean
   /** Ask before sending a message that would rewrite an expired cache. */
   guard: boolean
+  /** What happens once the handoff skill's turn finishes: keep the session, or /clear it. */
+  afterHandoff: 'stay' | 'clear'
 }
 
 /** The main thread's last model request, as the cache sees it. */
@@ -50,6 +52,8 @@ export type CacheRun = {
   paused: boolean
   /** The `lastAt` an expiry was already reported for. */
   expiredFor: number
+  /** True from running the handoff skill until its turn completes. */
+  handoffPending?: boolean
   /** What the mod will or did do, for the band. */
   phase: 'idle' | 'warming' | 'handed-off' | 'notified' | 'stopped'
 }

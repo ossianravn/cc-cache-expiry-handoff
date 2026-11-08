@@ -145,17 +145,42 @@ async function handOffNow($: $, s: CacheSettings) {
   await patchRun($, { isActing: true, armed: false })
   try {
     if (s.toast) $.ui.toast(`Cache expires soon: running /${s.skill}`)
+    await patchRun($, { handoffPending: true })
     await $.command.run({ command: s.skill, args: s.skillArgs })
     await patchRun($, { phase: 'handed-off' })
     await log($, 'handoff', `Ran /${s.skill}`)
   } catch (err) {
     const why = err instanceof Error ? err.message : String(err)
     await log($, 'error', `/${s.skill} did not run: ${why.slice(0, 120)}`)
-    await patchRun($, { phase: 'notified' })
+    await patchRun($, { phase: 'notified', handoffPending: false })
     await alert($, s, `Couldn't run /${s.skill}. The prompt cache expires soon: send a message to keep it.`)
   } finally {
     await patchRun($, { isActing: false })
   }
+}
+
+/** Once the handoff skill's turn has finished, clear the session if the person asked for it. */
+async function afterHandoffTurn($: $, isAborted: boolean) {
+  const [s, run] = await Promise.all([read($, settingsA), read($, runA)])
+  if (!run.handoffPending) return
+  await patchRun($, { handoffPending: false })
+  if (s.afterHandoff !== 'clear') return
+  if (isAborted) {
+    await log($, 'handoff', `/${s.skill} was interrupted; session kept`)
+    return
+  }
+  // Run outside the turn.complete dispatch: a command can't start inside a hook the turn waits on.
+  $.clock.after(1500, () => {
+    void (async () => {
+      try {
+        await $.command.run({ command: 'clear' })
+        if (s.toast) $.ui.toast(`Handoff done: session cleared`)
+      } catch (err) {
+        const why = err instanceof Error ? err.message : String(err)
+        await log($, 'error', `/clear did not run: ${why.slice(0, 120)}`)
+      }
+    })()
+  })
 }
 
 async function tick($: $) {
@@ -267,7 +292,10 @@ export const register: Register = on => {
   })
 
   on('turn.complete', async ($, e, next) => {
-    if (e.agentId === undefined) await patchRun($, { isWorking: false })
+    if (e.agentId === undefined) {
+      await patchRun($, { isWorking: false })
+      await afterHandoffTurn($, e.isAborted)
+    }
     return next(e)
   })
 
@@ -291,7 +319,7 @@ export const register: Register = on => {
         return { drop: 'Not sent: the prompt cache had expired. /compact or /clear first makes the rewrite smaller.' }
       }
     }
-    await patchRun($, { armed: true, activeSince: now, phase: 'idle' })
+    await patchRun($, { armed: true, activeSince: now, phase: 'idle', handoffPending: false })
     return next(e)
   }).catch(($, e, next) => next(e))
 
@@ -575,6 +603,14 @@ export const register: Register = on => {
             ? row(
                 'Instructions',
                 <Input key="args" value={s.skillArgs} placeholder="Arguments for the skill" rows={2} submitLabel="save" onSubmit={v => void setSettings($, { skillArgs: v })} />,
+              )
+            : null}
+          {isHandoff
+            ? row(
+                'Afterwards',
+                segmented('after', [{ value: 'stay', label: 'Stay' }, { value: 'clear', label: 'Clear' }] as const, s.afterHandoff, v =>
+                  void setSettings($, { afterHandoff: v }),
+                ),
               )
             : null}
           {s.mode !== 'notify'

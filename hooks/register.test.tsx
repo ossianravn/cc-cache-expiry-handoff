@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { DEFAULT_SETTINGS, EMPTY_SNAP, IDLE_RUN, MIN, TTL_1H, TTL_5M, decide, inferTtl, leadMs } from './logic'
+import { DEFAULT_SETTINGS, EMPTY_SNAP, IDLE_RUN, MIN, TTL_1H, TTL_5M, decide, inferTtl, leadMs, normalizeSettings } from './logic'
 
 const NOW = 10_000_000
 
@@ -139,4 +139,9 @@ test('the settings pane draws every mode on terminal and desktop', async ($, on)
       await ui.unmount()
     }
   }
+})
+
+test('settings keep a valid Afterwards choice and drop a bad one', async () => {
+  expect(normalizeSettings({ afterHandoff: 'clear' }).afterHandoff).toBe('clear')
+  expect(normalizeSettings({ afterHandoff: 'nuke' }).afterHandoff).toBe('stay')
 })

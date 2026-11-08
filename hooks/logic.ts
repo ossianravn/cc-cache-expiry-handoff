@@ -22,6 +22,7 @@ export const DEFAULT_SETTINGS: CacheSettings = {
   toast: true,
   systemNotify: true,
   guard: false,
+  afterHandoff: 'stay',
 }
 
 export const EMPTY_SNAP: CacheSnapshot = {
@@ -73,6 +74,7 @@ export function normalizeSettings(raw: unknown): CacheSettings {
   if (typeof r.toast === 'boolean') s.toast = r.toast
   if (typeof r.systemNotify === 'boolean') s.systemNotify = r.systemNotify
   if (typeof r.guard === 'boolean') s.guard = r.guard
+  if (r.afterHandoff === 'stay' || r.afterHandoff === 'clear') s.afterHandoff = r.afterHandoff
   return s
 }
 
