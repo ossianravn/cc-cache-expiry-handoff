@@ -32,6 +32,17 @@ import type { ExplicitTtl } from './logic'
 type $ = EngineInterface
 
 const PANE = 'cache'
+
+/** The Action control: keep-warm's follow-up is its own choice, so three short options fit one row. */
+const ACTIONS: readonly { value: CacheMode; label: string }[] = [
+  { value: 'notify', label: 'Notify' },
+  { value: 'warm', label: 'Keep warm' },
+  { value: 'handoff', label: 'Hand off' },
+]
+const THEN: readonly { value: CacheMode; label: string }[] = [
+  { value: 'warm', label: 'Notify' },
+  { value: 'warm-handoff', label: 'Hand off' },
+]
 const COMMAND = 'cache-expiry'
 
 const settingsA = atom({ plugin: 'cache-expiry-handoff', key: 'settings' } as const, DEFAULT_SETTINGS, {
@@ -405,15 +416,23 @@ export const register: Register = on => {
       segmented(key, [{ value: 'off', label: 'Off' }, { value: 'on', label: 'On' }] as const, value ? 'on' : 'off', v =>
         void setSettings($, { [field]: v === 'on' }),
       )
+    // Labels centre on their control; a hint sits under the control, not under the pair.
+    const labelWidth = e.surface === 'terminal' ? 18 : 13
     const row = (label: string, control: RenderChildren, hint?: string) => (
-      <Box flexDirection="row" gap={2}>
-        <Box width={18} flexShrink={0}>
-          <Text dimColor>{label}</Text>
+      <Box flexDirection="column">
+        <Box flexDirection="row" gap={2} alignItems="center">
+          <Box width={labelWidth} flexShrink={0}>
+            <Text dimColor>{label}</Text>
+          </Box>
+          <Box flexShrink={1}>{control}</Box>
         </Box>
-        <Box flexDirection="column" flexShrink={1} gap={0}>
-          {control}
-          {hint ? <Text dimColor size="footnote">{hint}</Text> : null}
-        </Box>
+        {hint ? (
+          <Box marginLeft={labelWidth + 2}>
+            <Text dimColor size="footnote">
+              {hint}
+            </Text>
+          </Box>
+        ) : null}
       </Box>
     )
     const select = (key: string, options: { value: string; label: string }[], value: string, pick: (v: string) => void) =>
@@ -511,7 +530,12 @@ export const register: Register = on => {
 
         <Box flexDirection="column" gap={rowGap}>
           <Text weight="semibold">Before it expires</Text>
-          {row('Action', segmented('mode', MODES, s.mode, (v: CacheMode) => void setSettings($, { mode: v })))}
+          {row(
+            'Action',
+            segmented('mode', ACTIONS, isWarm ? 'warm' : s.mode, (v: CacheMode) =>
+              void setSettings($, { mode: v === 'warm' && s.mode === 'warm-handoff' ? 'warm-handoff' : v }),
+            ),
+          )}
           {row(
             'When',
             select('lead', leadOptions, String(s.leadSec), v => void setSettings($, { leadSec: Number(v) })),
@@ -521,7 +545,12 @@ export const register: Register = on => {
             ? row(
                 'Keep warm for',
                 select('warmFor', warmOptions, String(s.warmForMin), v => void setSettings($, { warmForMin: Number(v) })),
-                s.mode === 'warm-handoff' ? `Then runs /${s.skill}.` : 'Then notifies and lets it expire.',
+              )
+            : null}
+          {isWarm
+            ? row(
+                'Then',
+                segmented('then', THEN, s.mode, (v: CacheMode) => void setSettings($, { mode: v })),
               )
             : null}
           {isHandoff
