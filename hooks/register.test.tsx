@@ -50,9 +50,10 @@ describe('inferTtl', () => {
     expect(inferTtl(snap(), usage, NOW + 20 * MIN, undefined, []).ms).toBe(TTL_1H)
   })
 
-  test('a subscription reads as 1 hour, an API key as 5 minutes', async () => {
+  test('a subscription or Claude sign-in reads as 1 hour, an API key as 5 minutes', async () => {
     expect(inferTtl(snap(), usage, NOW + MIN, undefined, ['five_hour']).ms).toBe(TTL_1H)
-    expect(inferTtl(snap(), usage, NOW + MIN, undefined, []).ms).toBe(TTL_5M)
+    expect(inferTtl(snap(), usage, NOW + MIN, undefined, [], true).ms).toBe(TTL_5M)
+    expect(inferTtl(snap(), usage, NOW + MIN, undefined, []).ms).toBe(TTL_1H)
   })
 
   test('an explicit setting wins', async () => {

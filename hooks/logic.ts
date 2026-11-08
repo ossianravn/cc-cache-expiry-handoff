@@ -142,6 +142,7 @@ export function inferTtl(
   now: number,
   explicit: ExplicitTtl,
   rateLimitKinds: readonly string[],
+  usesApiBilling = false,
 ): { ms: number; source: string } {
   if (explicit) return explicit
   const gap = prev.lastAt > 0 ? now - prev.lastAt : 0
@@ -166,7 +167,9 @@ export function inferTtl(
   if (rateLimitKinds.some(k => k === 'five_hour' || k === 'seven_day')) {
     return { ms: TTL_1H, source: 'subscription' }
   }
-  return { ms: TTL_5M, source: 'API default' }
+  // No rate-limit windows yet: an API key or a cloud provider means 5 minutes,
+  // a Claude account sign-in means 1 hour.
+  return usesApiBilling ? { ms: TTL_5M, source: 'API key' } : { ms: TTL_1H, source: 'Claude account' }
 }
 
 export type Action =

@@ -161,7 +161,8 @@ async function handOffNow($: $, s: CacheSettings) {
 async function tick($: $) {
   const [s, snap, run] = await Promise.all([read($, settingsA), read($, snapA), read($, runA)])
   const now = await $.clock.now()
-  if (snap.lastAt > 0) await update($, nowA, () => now)
+  // While a turn runs the band reads "in use"; skip the per-second redraw.
+  if (snap.lastAt > 0 && !run.isWorking) await update($, nowA, () => now)
   const action = decide(now, s, snap, run)
   const tokens = fmtTokens(prefixTokens(snap))
   switch (action.kind) {
@@ -194,11 +195,14 @@ async function tick($: $) {
 
 let ticker: Timer | undefined
 let explicit: ExplicitTtl
+let usesApiBilling = false
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     sessionId = await $.session.id()
-    const restored = await restoreSnap($)
+    await restoreSnap($)
+    // A reload mid-turn or mid-action must not leave actions blocked.
+    await patchRun($, { isWorking: false, isActing: false })
     const stored = await $.store.get('settings')
     await update($, settingsA, () => normalizeSettings(stored))
     explicit = explicitTtl({
@@ -207,6 +211,13 @@ export const register: Register = on => {
       ttlVar: await $.env.get('CLAUDE_CODE_PROMPT_CACHE_TTL'),
       setting: await $.settings.read({ key: 'promptCacheTtl' }),
     })
+    const billing = [
+      await $.env.get('ANTHROPIC_API_KEY'),
+      await $.env.get('CLAUDE_CODE_USE_BEDROCK'),
+      await $.env.get('CLAUDE_CODE_USE_VERTEX'),
+      await $.env.get('CLAUDE_CODE_USE_FOUNDRY'),
+    ]
+    usesApiBilling = billing.some(v => v !== undefined && v !== '' && v !== '0')
     await $.command.register({
       name: COMMAND,
       description: 'Prompt cache: countdown, before-expiry action and settings',
@@ -240,7 +251,7 @@ export const register: Register = on => {
         fresh: u.input_tokens,
         model: u.model,
       }
-      const ttl = inferTtl(prev, usage, now, explicit, rateLimits.map(r => r.kind))
+      const ttl = inferTtl(prev, usage, now, explicit, rateLimits.map(r => r.kind), usesApiBilling)
       if (prev.lastAt > 0 && (ttl.ms !== prev.autoTtlMs || ttl.source !== prev.autoTtlSource)) {
         await log($, 'ttl', `Cache lifetime: ${fmtTtl(ttl.ms)} (${ttl.source})`)
       }
@@ -505,7 +516,7 @@ export const register: Register = on => {
 
         <Box flexDirection="column" gap={0}>
           <Box flexDirection="row" flexWrap="wrap" gap={1}>
-            {hasData ? <Button key="warm-now" label={warmLabel} variant="primary" onPress={() => void warmNow($, s, true)} /> : null}
+            {hasData && left > 0 ? <Button key="warm-now" label={warmLabel} onPress={() => void warmNow($, s, true)} /> : null}
             <Button key="handoff-now" label={`Run /${s.skill}`} onPress={() => void handOffNow($, s)} />
             <Button key="pause" label={run.paused ? 'Resume' : 'Pause'} onPress={() => void patchRun($, { paused: !run.paused })} />
           </Box>
@@ -570,7 +581,7 @@ export const register: Register = on => {
             ? row(
                 'Only above',
                 select('min', minOptions, String(s.minTokens), v => void setSettings($, { minTokens: Number(v) })),
-                'Smaller contexts get a notification instead.',
+                'Smaller contexts only notify.',
               )
             : null}
         </Box>
@@ -584,7 +595,12 @@ export const register: Register = on => {
           )}
           {row('Toasts', onOff('toast', s.toast, 'toast'))}
           {row('System alerts', onOff('system', s.systemNotify, 'systemNotify'))}
-          {row('Confirm cold send', onOff('guard', s.guard, 'guard'))}
+          {row(
+            'Cold send',
+            segmented('guard', [{ value: 'send', label: 'Send' }, { value: 'ask', label: 'Ask first' }] as const, s.guard ? 'ask' : 'send', v =>
+              void setSettings($, { guard: v === 'ask' }),
+            ),
+          )}
         </Box>
       </Box>
     )
