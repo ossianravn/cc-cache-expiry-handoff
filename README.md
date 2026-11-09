@@ -75,16 +75,15 @@ The band appears above the prompt after Claude's next reply.
 ## How it works
 
 ```mermaid
-flowchart LR
-  A(["Claude replies"]) --> B["Countdown starts<br/>(5 min or 1 h)"]
-  B --> C{"2 min before<br/>expiry"}
+flowchart TD
+  A(["Claude replies:<br/>the countdown starts"]) --> C{"2 min before expiry"}
   C -->|Notify| D["Toast and<br/>system alert"]
   C -->|Hand off| E["Runs your skill,<br/>e.g. /handoff"]
   C -->|Keep warm| F{"Away less than<br/>While away?"}
   F -->|yes| G["Silent keep-warm<br/>resets the timer"]
   G --> C
   F -->|no| H["After that:<br/>Notify or Hand off"]
-  E -.->|"After handoff: Clear session"| I["/clear"]
+  E -.->|"After handoff:<br/>Clear session"| I["/clear"]
 ```
 
 Notify and Hand off run once per idle stretch, and Keep warm repeats until **While away** runs out. Your next message starts a new stretch.
