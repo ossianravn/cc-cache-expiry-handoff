@@ -76,10 +76,10 @@ The band appears above the prompt after Claude's next reply.
 
 ```mermaid
 flowchart TD
-  A(["Claude replies:<br/>the countdown starts"]) --> C{"2 min before expiry"}
+  A(["Claude replies: the countdown starts"]) --> C(["2 min before expiry"])
   C -->|Notify| D["Toast and<br/>system alert"]
   C -->|Hand off| E["Runs your skill,<br/>e.g. /handoff"]
-  C -->|Keep warm| F{"Away less than<br/>While away?"}
+  C -->|Keep warm| F["Away less than<br/>While away?"]
   F -->|yes| G["Silent keep-warm<br/>resets the timer"]
   G --> C
   F -->|no| H["After that:<br/>Notify or Hand off"]
