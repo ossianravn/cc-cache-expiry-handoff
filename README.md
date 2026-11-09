@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  A <a href="https://claude.com/claude-code">Claude Code</a> mod that shows how long your prompt cache has left,<br>
+  A <a href="https://claude.com/claude-code">Claude Code</a> mod that shows how long your prompt cache has left,
   and keeps it warm, hands off or warns you before it expires.
 </p>
 
