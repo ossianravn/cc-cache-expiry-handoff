@@ -9,7 +9,7 @@ const run = (over = {}) => ({ ...IDLE_RUN, armed: true, activeSince: NOW, ...ove
 
 describe('decide', () => {
   test('does nothing until the lead time', async () => {
-    expect(decide(NOW + 3 * MIN, DEFAULT_SETTINGS, snap(), run()).kind).toBe('none')
+    expect(decide(NOW + 2 * MIN, DEFAULT_SETTINGS, snap(), run()).kind).toBe('none')
   })
 
   test('notifies once inside the lead time, then waits for the person', async () => {
@@ -91,7 +91,7 @@ test('the band shows the countdown on terminal and desktop', async ($, on) => {
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...BAND, surface })
     expect((await ui.find({ type: 'Text', text: /^3:00$/ }))?.text).toBe('3:00')
-    expect(await ui.find({ type: 'Text', text: /notifies at 1:00/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /notifies at 2:00/ })).toBeDefined()
     await ui.unmount()
   }
 })
@@ -144,4 +144,9 @@ test('the settings pane draws every mode on terminal and desktop', async ($, on)
 test('settings keep a valid Afterwards choice and drop a bad one', async () => {
   expect(normalizeSettings({ afterHandoff: 'clear' }).afterHandoff).toBe('clear')
   expect(normalizeSettings({ afterHandoff: 'nuke' }).afterHandoff).toBe('stay')
+})
+
+test('a saved lead under 2 minutes rises to 2 minutes', async () => {
+  expect(normalizeSettings({ leadSec: 60 }).leadSec).toBe(120)
+  expect(normalizeSettings({ leadSec: 300 }).leadSec).toBe(300)
 })

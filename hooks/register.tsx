@@ -496,7 +496,7 @@ export const register: Register = on => {
     const isWarm = s.mode === 'warm' || s.mode === 'warm-handoff'
     const isHandoff = s.mode === 'handoff' || s.mode === 'warm-handoff'
 
-    const leadOptions = [15, 30, 60, 120, 180, 300, 600, 900].map(v => ({ value: String(v), label: `${fmtDuration(v)} before` }))
+    const leadOptions = [120, 180, 300, 600, 900].map(v => ({ value: String(v), label: `${fmtDuration(v)} before` }))
     if (!leadOptions.some(o => o.value === String(s.leadSec))) leadOptions.push({ value: String(s.leadSec), label: `${fmtDuration(s.leadSec)} before` })
     const warmOptions = [15, 30, 60, 120, 240, 480, 1440].map(v => ({ value: String(v), label: fmtDuration(v * 60) }))
     if (!warmOptions.some(o => o.value === String(s.warmForMin))) warmOptions.push({ value: String(s.warmForMin), label: fmtDuration(s.warmForMin * 60) })

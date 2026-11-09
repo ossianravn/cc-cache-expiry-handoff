@@ -7,12 +7,15 @@ export const MIN = 60_000
 export const TTL_5M = 5 * MIN
 export const TTL_1H = 60 * MIN
 
+/** The earliest an action may run before expiry: a keep-warm or handoff needs time to finish. */
+export const MIN_LEAD_SEC = 120
+
 /** Keep-warm question sent over the session's own transcript (`$.model.fork`). */
 export const PING_PROMPT = 'Reply with the single word: warm'
 
 export const DEFAULT_SETTINGS: CacheSettings = {
   mode: 'notify',
-  leadSec: 60,
+  leadSec: MIN_LEAD_SEC,
   warmForMin: 60,
   skill: 'handoff',
   skillArgs:
@@ -65,7 +68,7 @@ export function normalizeSettings(raw: unknown): CacheSettings {
   if (raw === null || typeof raw !== 'object') return s
   const r = raw as Record<string, unknown>
   if (typeof r.mode === 'string' && MODE_VALUES.includes(r.mode)) s.mode = r.mode as CacheMode
-  if (isNum(r.leadSec)) s.leadSec = Math.min(Math.max(Math.round(r.leadSec), 5), 30 * 60)
+  if (isNum(r.leadSec)) s.leadSec = Math.min(Math.max(Math.round(r.leadSec), MIN_LEAD_SEC), 30 * 60)
   if (isNum(r.warmForMin)) s.warmForMin = Math.min(Math.max(Math.round(r.warmForMin), 1), 7 * 24 * 60)
   if (typeof r.skill === 'string' && r.skill.trim()) s.skill = r.skill.trim().replace(/^\//, '')
   if (typeof r.skillArgs === 'string') s.skillArgs = r.skillArgs
@@ -90,7 +93,7 @@ export function ttlSource(s: CacheSettings, snap: CacheSnapshot): string {
 
 /** The lead time, kept inside the cache lifetime so an action never fires right after a reply. */
 export function leadMs(s: CacheSettings, ttl: number): number {
-  return Math.min(Math.max(s.leadSec * 1000, 15_000), ttl - 30_000)
+  return Math.min(Math.max(s.leadSec, MIN_LEAD_SEC) * 1000, ttl - 30_000)
 }
 
 export function prefixTokens(snap: CacheSnapshot): number {

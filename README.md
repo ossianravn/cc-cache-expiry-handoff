@@ -9,13 +9,13 @@ A Claude Code mod that shows how long your prompt cache has left and acts before
 In the terminal the band draws as text:
 
 ```
-● Cache ████████░░░░ 3:41 1h · 96% hit · 151k cached · warms at 1:00 [ Settings ]
+● Cache ████████░░░░ 3:41 1h · 96% hit · 151k cached · warms at 2:00 [ Settings ]
 ```
 
 ## What it does
 
 - **Countdown band above the prompt.** Time left, cache lifetime, hit rate and cached tokens. It turns amber inside the lead time and red once the cache has expired, when it tells you how many tokens the next message rewrites.
-- **One action before expiry**, run a chosen time (default 1 minute) before the cache lapses:
+- **One action before expiry**, run a chosen time (2 minutes or more, default 2) before the cache lapses:
 
   | Action | What happens |
   | --- | --- |
