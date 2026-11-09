@@ -24,6 +24,7 @@ import {
   prefixTokens,
   pushLog,
   remainingMs,
+  rowNotes,
   ttlMs,
   ttlSource,
 } from './logic'
@@ -500,7 +501,7 @@ export const register: Register = on => {
     if (!leadOptions.some(o => o.value === String(s.leadSec))) leadOptions.push({ value: String(s.leadSec), label: `${fmtDuration(s.leadSec)} before` })
     const warmOptions = [15, 30, 60, 120, 240, 480, 1440].map(v => ({ value: String(v), label: fmtDuration(v * 60) }))
     if (!warmOptions.some(o => o.value === String(s.warmForMin))) warmOptions.push({ value: String(s.warmForMin), label: fmtDuration(s.warmForMin * 60) })
-    const minOptions = [0, 10_000, 20_000, 50_000, 100_000].map(v => ({ value: String(v), label: v === 0 ? 'Any size' : `${fmtTokens(v)} tokens` }))
+    const minOptions = [0, 10_000, 20_000, 50_000, 100_000].map(v => ({ value: String(v), label: v === 0 ? 'Off' : `${fmtTokens(v)} tokens` }))
     if (!minOptions.some(o => o.value === String(s.minTokens))) minOptions.push({ value: String(s.minTokens), label: `${fmtTokens(s.minTokens)} tokens` })
     // A Select takes at most 64 options: handoff-like skills rank first, and the chosen one always stays.
     const shown = skills.slice(0, 64)
@@ -510,7 +511,7 @@ export const register: Register = on => {
       label: `/${n}${skills.length > 0 && !skills.includes(n) ? ' (not found)' : ''}`,
     }))
     const isSkillMissing = skills.length > 0 && !skills.includes(s.skill)
-    const isCapped = s.leadSec * 1000 > lead
+    const notes = rowNotes(now, s, snap, run)
 
     const ttlOptions: { value: CacheTtlChoice; label: string }[] = [
       { value: 'auto', label: 'Auto' },
@@ -588,18 +589,20 @@ export const register: Register = on => {
           {row(
             'When',
             select('lead', leadOptions, String(s.leadSec), v => void setSettings($, { leadSec: Number(v) })),
-            isCapped ? `Capped at ${fmtClock(lead)} before for a ${fmtTtl(ttl)} cache.` : undefined,
+            notes.when,
           )}
           {isWarm
             ? row(
-                'Keep warm for',
+                'While away',
                 select('warmFor', warmOptions, String(s.warmForMin), v => void setSettings($, { warmForMin: Number(v) })),
+                notes.away,
               )
             : null}
           {isWarm
             ? row(
-                'Then',
+                'After that',
                 segmented('then', THEN, s.mode, (v: CacheMode) => void setSettings($, { mode: v })),
+                notes.then,
               )
             : null}
           {isHandoff
@@ -617,17 +620,18 @@ export const register: Register = on => {
             : null}
           {isHandoff
             ? row(
-                'Afterwards',
-                segmented('after', [{ value: 'stay', label: 'Stay' }, { value: 'clear', label: 'Clear' }] as const, s.afterHandoff, v =>
+                'After handoff',
+                segmented('after', [{ value: 'stay', label: 'Keep session' }, { value: 'clear', label: 'Clear session' }] as const, s.afterHandoff, v =>
                   void setSettings($, { afterHandoff: v }),
                 ),
+                notes.afterHandoff,
               )
             : null}
           {s.mode !== 'notify'
             ? row(
-                'Only above',
+                'Skip below',
                 select('min', minOptions, String(s.minTokens), v => void setSettings($, { minTokens: Number(v) })),
-                'Smaller contexts only notify.',
+                notes.skip,
               )
             : null}
         </Box>
@@ -642,10 +646,11 @@ export const register: Register = on => {
           {row('Toasts', onOff('toast', s.toast, 'toast'))}
           {row('System alerts', onOff('system', s.systemNotify, 'systemNotify'))}
           {row(
-            'Cold send',
-            segmented('guard', [{ value: 'send', label: 'Send' }, { value: 'ask', label: 'Ask first' }] as const, s.guard ? 'ask' : 'send', v =>
+            'After expiry',
+            segmented('guard', [{ value: 'send', label: 'Just send' }, { value: 'ask', label: 'Ask first' }] as const, s.guard ? 'ask' : 'send', v =>
               void setSettings($, { guard: v === 'ask' }),
             ),
+            notes.cold,
           )}
         </Box>
       </Box>

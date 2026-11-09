@@ -204,7 +204,116 @@ export function decide(now: number, s: CacheSettings, snap: CacheSnapshot, run: 
   return mode === 'warm-handoff' ? { kind: 'handoff' } : { kind: 'notify', reason: 'budget' }
 }
 
+/**
+ * When the before-expiry actions will run, as `decide` would run them.
+ *
+ * Live (armed, with data): counted from now. Otherwise from the end of a reply,
+ * assuming the reply came right after the person's message.
+ */
+export type Schedule = {
+  isLive: boolean
+  /** Until the first action: from now when live, else from a reply. */
+  firstIn: number
+  /** Keep-warms still to come before the idle budget runs out (warm modes). */
+  pings: number
+  /** Until the budget's end, when Then runs (warm modes). */
+  thenIn: number
+}
+
+export function schedule(now: number, s: CacheSettings, snap: CacheSnapshot, run: CacheRun): Schedule {
+  const ttl = ttlMs(s, snap)
+  const cycle = ttl - leadMs(s, ttl)
+  // Mid-turn the last request predates the message: count from the reply to come instead.
+  const isLive = snap.lastAt > 0 && run.armed && !run.paused && !run.isWorking && snap.lastAt >= run.activeSince
+  const lastAt = isLive ? snap.lastAt : 0
+  const since = isLive ? run.activeSince : 0
+  const from = isLive ? now : 0
+  // Keep-warms run at lastAt + k·cycle while (that − since) < budget; the first k past it runs Then.
+  const k = Math.max(1, Math.ceil((since + s.warmForMin * MIN - lastAt) / cycle))
+  return {
+    isLive,
+    firstIn: Math.max(0, lastAt + cycle - from),
+    pings: k - 1,
+    thenIn: Math.max(0, lastAt + k * cycle - from),
+  }
+}
+
+/** The line under each settings row: what that setting will do with this session, now. */
+export type RowNotes = {
+  when?: string
+  away?: string
+  then?: string
+  afterHandoff?: string
+  skip?: string
+  cold: string
+}
+
+export function rowNotes(now: number, s: CacheSettings, snap: CacheSnapshot, run: CacheRun): RowNotes {
+  const ttl = ttlMs(s, snap)
+  const lead = leadMs(s, ttl)
+  const plan = schedule(now, s, snap, run)
+  const hasData = snap.lastAt > 0
+  const tokens = prefixTokens(snap)
+  const at = (ms: number) => (plan.isLive ? (ms > 0 ? `in ${fmtSpan(ms)}` : 'now') : `${fmtSpan(ms)} after each reply`)
+  const skill = `/${s.skill}`
+  const isWarm = s.mode === 'warm' || s.mode === 'warm-handoff'
+  const isSmall = hasData && tokens < s.minTokens
+
+  const thenVerb = s.mode === 'warm-handoff' ? `Runs ${skill}` : 'Notifies you'
+  // With no keep-warm inside the budget, the first thing to run is Then.
+  const first =
+    s.mode === 'notify' || isSmall
+      ? 'Notifies you'
+      : s.mode === 'handoff'
+        ? `Runs ${skill}`
+        : plan.pings === 0
+          ? thenVerb
+          : 'Keeps warm'
+  const capped = s.leadSec * 1000 > lead ? `Capped at ${fmtClock(lead)} for a ${fmtTtl(ttl)} cache. ` : ''
+  const when = run.paused
+    ? 'Paused for this session.'
+    : hasData && !run.armed
+      ? 'Waits for your next message.'
+      : `${capped}${first} ${at(plan.firstIn)}`
+
+  let away: string | undefined
+  let then: string | undefined
+  if (isWarm && !isSmall) {
+    const n = plan.pings
+    away =
+      n === 0
+        ? `No keep-warm fits: the ${fmtTtl(ttl)} cache outlasts it.`
+        : `${n} keep-warm${n === 1 ? '' : 's'}${hasData ? ` ≈ ${fmtTokens(Math.round((n * tokens) / 10))} tokens at full price` : ''}`
+    then = run.paused || (hasData && !run.armed) || n === 0 ? undefined : `${thenVerb} ${at(plan.thenIn)}`
+  }
+
+  const skip =
+    s.mode === 'notify'
+      ? undefined
+      : hasData
+        ? `This session: ${fmtTokens(tokens)} tokens${isSmall ? ', so it only notifies' : ''}`
+        : 'Smaller sessions only get a notification.'
+
+  const multiple = coldMultiple(ttl)
+  return {
+    when,
+    away,
+    then,
+    afterHandoff: s.afterHandoff === 'clear' ? `Runs /clear once ${skill} finishes.` : undefined,
+    skip,
+    cold: `Rewriting ${hasData ? `${fmtTokens(tokens)} tokens` : 'an expired cache'} costs ≈ ${multiple}× a warm read.`,
+  }
+}
+
 // ---------- formatting ----------
+
+/** A span to the minute: `58 min`, `1 h 56 min`, `24 h`. */
+export function fmtSpan(ms: number): string {
+  const m = Math.max(1, Math.round(ms / MIN))
+  if (m < 60) return `${m} min`
+  const h = Math.floor(m / 60)
+  return m % 60 ? `${h} h ${m % 60} min` : `${h} h`
+}
 
 export function fmtClock(ms: number): string {
   const total = Math.max(0, Math.ceil(ms / 1000))
