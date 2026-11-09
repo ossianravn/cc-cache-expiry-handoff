@@ -1,6 +1,6 @@
 {
   "name": "cache-expiry-handoff",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Prompt cache countdown above the prompt; before it expires, notify you, keep it warm, or run your handoff skill.",
   "author": { "name": "Ossian Ravn" },
   "repository": "https://github.com/ossianravn/cc-cache-expiry-handoff",
