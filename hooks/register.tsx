@@ -1,15 +1,17 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren, Timer } from 'claude-code'
 
-import type { CacheLogEntry, CacheLogKind, CacheMode, CacheRun, CacheSettings, CacheSnapshot, CacheTtlChoice } from '../types'
+import type { CacheExperiment, CacheLogEntry, CacheLogKind, CacheMode, CacheRun, CacheSettings, CacheSnapshot, CacheTtlChoice } from '../types'
 import {
   DEFAULT_SETTINGS,
+  EMPTY_EXP,
   EMPTY_SNAP,
   IDLE_RUN,
   MODES,
   PING_PROMPT,
   coldMultiple,
   decide,
+  experimentRow,
   explicitTtl,
   fmtAgo,
   fmtClock,
@@ -23,6 +25,7 @@ import {
   normalizeSettings,
   prefixTokens,
   pushLog,
+  readExperiment,
   remainingMs,
   rowNotes,
   ttlMs,
@@ -54,6 +57,7 @@ const runA = atom({ plugin: 'cache-expiry-handoff', key: 'run' } as const, IDLE_
 const logA = atom({ plugin: 'cache-expiry-handoff', key: 'log' } as const, [], { shape: 'log-1' })
 const nowA = atom({ plugin: 'cache-expiry-handoff', key: 'now' } as const, 0)
 const skillsA = atom({ plugin: 'cache-expiry-handoff', key: 'skills' } as const, [])
+const expA = atom({ plugin: 'cache-expiry-handoff', key: 'exp' } as const, EMPTY_EXP)
 
 // ---------- state helpers ----------
 
@@ -114,6 +118,37 @@ async function refreshSkills($: $) {
   const rank = (n: string) => (/hand-?off/i.test(n) ? 0 : 1)
   const sorted = [...new Set(names)].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b)).slice(0, 300)
   await update($, skillsA, () => sorted)
+}
+
+/**
+ * Reads the experiment ID Claude Code cached for the session's model from its
+ * global config (CLAUDE_CONFIG_DIR, else the home folder). Keeps three
+ * characters of it, and remembers when each ID was first seen.
+ */
+async function refreshExperiment($: $) {
+  try {
+    const snap = await read($, snapA)
+    const model = snap.model || (await $.session.model())
+    const dir = (await $.env.get('CLAUDE_CONFIG_DIR')) || (await $.env.get('USERPROFILE')) || (await $.env.get('HOME'))
+    if (!dir) return
+    const text = await $.fs.read(`${dir.replace(/[\\/]+$/, '')}/.claude.json`)
+    const exp = readExperiment(JSON.parse(text), model, await $.env.get('CLAUDE_CODE_ENTRYPOINT'))
+    if (exp.state === 'active') {
+      const saved = await $.store.get('experiments')
+      const seen: Record<string, number> = saved !== null && typeof saved === 'object' ? { ...(saved as Record<string, number>) } : {}
+      const key = `${exp.model}:${exp.id}`
+      let first = seen[key] ?? 0
+      if (!(first > 0)) {
+        first = seen[key] = await $.clock.now()
+        const kept = Object.entries(seen).sort((a, b) => b[1] - a[1]).slice(0, 20)
+        await $.store.set('experiments', Object.fromEntries(kept))
+      }
+      exp.firstSeenAt = first
+    }
+    await update($, expA, () => exp)
+  } catch {
+    await update($, expA, (v): CacheExperiment => ({ ...v, state: 'unknown' }))
+  }
 }
 
 // ---------- actions ----------
@@ -251,6 +286,7 @@ export const register: Register = on => {
     })
     ticker?.cancel()
     ticker = $.clock.every(1000, () => void tick($).catch(() => undefined))
+    void refreshExperiment($)
     return next(e)
   })
 
@@ -306,6 +342,7 @@ export const register: Register = on => {
     if (e.agentId === undefined) {
       await patchRun($, { isWorking: false })
       await afterHandoffTurn($, e.isAborted)
+      void refreshExperiment($)
     }
     return next(e)
   })
@@ -340,7 +377,7 @@ export const register: Register = on => {
     switch (sub.toLowerCase()) {
       case '':
       case 'settings':
-        await refreshSkills($)
+        await Promise.all([refreshSkills($), refreshExperiment($)])
         await $.ui.open({ id: PANE, title: 'Prompt cache', focus: true, closeOnEscape: true, rows: 30, columns: 64 })
         return { text: await statusText($) }
       case 'warm':
@@ -433,13 +470,14 @@ export const register: Register = on => {
   // ---------- the settings pane ----------
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const [s, snap, run, logs, tickNow, skills] = await Promise.all([
+    const [s, snap, run, logs, tickNow, skills, exp] = await Promise.all([
       read($, settingsA),
       read($, snapA),
       read($, runA),
       read($, logA),
       read($, nowA),
       read($, skillsA),
+      read($, expA),
     ])
     const ui = $.ui.resolve(e)
     const { Box, Text, Button } = ui
@@ -512,6 +550,8 @@ export const register: Register = on => {
     }))
     const isSkillMissing = skills.length > 0 && !skills.includes(s.skill)
     const notes = rowNotes(now, s, snap, run)
+    // The tick only runs once there is a reply; the clock covers the pane before that.
+    const expRow = experimentRow(hasData ? now : await $.clock.now(), exp)
 
     const ttlOptions: { value: CacheTtlChoice; label: string }[] = [
       { value: 'auto', label: 'Auto' },
@@ -652,6 +692,13 @@ export const register: Register = on => {
             ),
             notes.cold,
           )}
+          {row(
+            'Experiment',
+            <Text key="exp" tabular dimColor={expRow.value === 'Unknown'}>
+              {expRow.value}
+            </Text>,
+            expRow.note,
+          )}
         </Box>
       </Box>
     )
@@ -661,7 +708,7 @@ export const register: Register = on => {
 // ---------- shared view helpers ----------
 
 async function openPane($: $) {
-  await refreshSkills($)
+  await Promise.all([refreshSkills($), refreshExperiment($)])
   await $.ui.open({ id: PANE, title: 'Prompt cache', focus: true, closeOnEscape: true, rows: 30, columns: 64 })
 }
 
@@ -697,12 +744,13 @@ function barSvg(fill: number, tone: string): string {
 }
 
 async function statusText($: $): Promise<string> {
-  const [s, snap, run] = await Promise.all([read($, settingsA), read($, snapA), read($, runA)])
+  const [s, snap, run, exp] = await Promise.all([read($, settingsA), read($, snapA), read($, runA), read($, expA)])
   if (snap.lastAt === 0) return 'Prompt cache: waiting for the first reply.'
+  const experiment = exp.state === 'active' ? ` Experiment ${exp.id}.` : ''
   const now = await $.clock.now()
   const ttl = ttlMs(s, snap)
   const left = remainingMs(now, s, snap)
   const mode = MODES.find(m => m.value === s.mode)?.label ?? s.mode
   const when = left > 0 ? `${fmtClock(left)} left` : `expired ${fmtAgo(-left)}`
-  return `Prompt cache: ${when} of ${fmtTtl(ttl)} (${ttlSource(s, snap)}), ${fmtTokens(prefixTokens(snap))} tokens, ${Math.round(hitRate(snap) * 100)}% hit. Before expiry: ${mode}, ${fmtDuration(Math.round(leadMs(s, ttl) / 1000))} before.${run.paused ? ' Paused.' : ''}`
+  return `Prompt cache: ${when} of ${fmtTtl(ttl)} (${ttlSource(s, snap)}), ${fmtTokens(prefixTokens(snap))} tokens, ${Math.round(hitRate(snap) * 100)}% hit. Before expiry: ${mode}, ${fmtDuration(Math.round(leadMs(s, ttl) / 1000))} before.${run.paused ? ' Paused.' : ''}${experiment}`
 }

@@ -1,7 +1,7 @@
 // Pure logic of the mod: defaults, the cache lifetime, the decision of what to
 // do before expiry, and formatting. No `$` here, so it is easy to test.
 
-import type { CacheLogEntry, CacheMode, CacheRun, CacheSettings, CacheSnapshot, CacheTtlChoice } from '../types'
+import type { CacheExperiment, CacheLogEntry, CacheMode, CacheRun, CacheSettings, CacheSnapshot, CacheTtlChoice } from '../types'
 
 export const MIN = 60_000
 export const TTL_5M = 5 * MIN
@@ -303,6 +303,66 @@ export function rowNotes(now: number, s: CacheSettings, snap: CacheSnapshot, run
     skip,
     cold: `Rewriting ${hasData ? `${fmtTokens(tokens)} tokens` : 'an expired cache'} costs ≈ ${multiple}× a warm read.`,
   }
+}
+
+// ---------- experiment ----------
+
+export const EMPTY_EXP: CacheExperiment = { state: 'unknown', id: '', model: '', updatedAt: 0, firstSeenAt: 0 }
+
+/** `claude-opus-5-5[1m]` → `claude-opus-5-5`: the slots key on the bare model id. */
+export const bareModel = (model: string) => model.replace(/\[[^\]]*\]$/, '').trim()
+
+/**
+ * The experiment ID cached for `model` in the parsed ~/.claude.json: the newest
+ * slot of the signed-in organisation, preferring the session's own entrypoint
+ * (`cli`, `claude-desktop`, ...). Only the ID's first three characters leave here.
+ */
+export function readExperiment(config: unknown, model: string, entrypoint?: string): CacheExperiment {
+  const want = bareModel(model)
+  if (!want || config === null || typeof config !== 'object') return { ...EMPTY_EXP, model: want }
+  const c = config as { oauthAccount?: { organizationUuid?: unknown }; clientDataCacheSlots?: unknown }
+  const org = typeof c.oauthAccount?.organizationUuid === 'string' ? c.oauthAccount.organizationUuid : undefined
+  const raw = c.clientDataCacheSlots
+  type Slot = { model?: unknown; org?: unknown; entrypoint?: unknown; at?: unknown; data?: { atis?: unknown } }
+  const slots = (raw !== null && typeof raw === 'object' ? (Object.values(raw) as Slot[]) : []).filter(
+    s => s !== null && typeof s === 'object' && s.model === want && (org === undefined || s.org === org),
+  )
+  const own = slots.filter(s => s.entrypoint === entrypoint)
+  const pool = own.length > 0 ? own : slots
+  const at = (s: Slot) => (isNum(s.at) ? s.at : 0)
+  const newest = pool.reduce<Slot | undefined>((best, s) => (best === undefined || at(s) > at(best) ? s : best), undefined)
+  if (!newest) return { ...EMPTY_EXP, model: want }
+  const atis = newest.data?.atis
+  const id = typeof atis === 'string' ? atis.trim().slice(0, 3) : ''
+  return { state: id ? 'active' : 'none', id, model: want, updatedAt: at(newest), firstSeenAt: 0 }
+}
+
+/** `claude-opus-5-5` → `Opus 5.5`; anything else as given. */
+export function fmtModel(model: string): string {
+  const m = /^claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?$/.exec(bareModel(model))
+  const [, family = '', major = '', minor] = m ?? []
+  if (!family) return model
+  return `${family.charAt(0).toUpperCase()}${family.slice(1)} ${major}${minor ? `.${minor}` : ''}`
+}
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+/** `Nov 8`, in the engine's local time. */
+export function fmtDay(ms: number): string {
+  const d = new Date(ms)
+  return `${MONTHS[d.getMonth()]} ${d.getDate()}`
+}
+
+/** The Experiment row: its value and the line under it. */
+export function experimentRow(now: number, exp: CacheExperiment): { value: string; note: string } {
+  const model = exp.model ? fmtModel(exp.model) : 'this model'
+  if (exp.state === 'active') {
+    return { value: exp.id, note: `${model} · first seen ${fmtDay(exp.firstSeenAt || exp.updatedAt)}` }
+  }
+  if (exp.state === 'none') {
+    return { value: 'None', note: exp.updatedAt > 0 ? `${model} · updated ${fmtAgo(now - exp.updatedAt)}` : model }
+  }
+  return { value: 'Unknown', note: exp.model ? `Nothing cached for ${model}` : 'Shown after the first reply' }
 }
 
 // ---------- formatting ----------

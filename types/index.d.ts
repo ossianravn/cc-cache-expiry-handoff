@@ -58,6 +58,22 @@ export type CacheRun = {
   phase: 'idle' | 'warming' | 'handed-off' | 'notified' | 'stopped'
 }
 
+/**
+ * The server-side experiment Claude Code has cached for the session's model
+ * (`data.atis` of its client-data slot in ~/.claude.json). Only the first
+ * three characters of the ID are kept.
+ */
+export type CacheExperiment = {
+  /** `active`: an ID is cached; `none`: the slot has no ID; `unknown`: no slot or unreadable. */
+  state: 'active' | 'none' | 'unknown'
+  id: string
+  model: string
+  /** When Claude Code last cached the slot; 0 when unknown. */
+  updatedAt: number
+  /** When this mod first saw this ID for this model; 0 when not active. */
+  firstSeenAt: number
+}
+
 export type CacheLogKind = 'warm' | 'handoff' | 'notify' | 'expired' | 'error' | 'guard' | 'ttl'
 
 export type CacheLogEntry = { at: number; kind: CacheLogKind; text: string }
@@ -71,6 +87,7 @@ declare module 'claude-code' {
       log: Shaped<CacheLogEntry[]>
       now: number
       skills: string[]
+      exp: CacheExperiment
     }
   }
 }

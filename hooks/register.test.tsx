@@ -1,6 +1,22 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { DEFAULT_SETTINGS, EMPTY_SNAP, IDLE_RUN, MIN, TTL_1H, TTL_5M, decide, inferTtl, leadMs, normalizeSettings, rowNotes, schedule } from './logic'
+import {
+  DEFAULT_SETTINGS,
+  EMPTY_SNAP,
+  IDLE_RUN,
+  MIN,
+  TTL_1H,
+  TTL_5M,
+  decide,
+  experimentRow,
+  fmtModel,
+  inferTtl,
+  leadMs,
+  normalizeSettings,
+  readExperiment,
+  rowNotes,
+  schedule,
+} from './logic'
 
 const NOW = 10_000_000
 
@@ -81,7 +97,53 @@ const STORED: Record<string, unknown> = {
   run: { shape: 'run-1', value: run() },
   settings: { shape: 'settings-1', value: DEFAULT_SETTINGS },
   now: NOW + 2 * MIN,
+  exp: { state: 'active', id: '34e', model: 'claude-opus-5-5', updatedAt: NOW, firstSeenAt: NOW },
 }
+
+describe('experiment', () => {
+  const slot = (over: Record<string, unknown>) => ({ model: 'claude-opus-5-5', org: 'o1', entrypoint: 'cli', at: 1, data: {}, ...over })
+  const config = (...slots: Record<string, unknown>[]) => ({
+    oauthAccount: { organizationUuid: 'o1' },
+    clientDataCacheSlots: Object.fromEntries(slots.map((s, i) => [`k${i}`, s])),
+  })
+
+  test('takes the newest slot of the model and org, keeping three characters', async () => {
+    const c = config(
+      slot({ at: 5, data: { atis: '34e0aa11ff' } }),
+      slot({ at: 9, data: { atis: 'eab0bb22ee' } }),
+      slot({ at: 99, org: 'other', data: { atis: '763' } }),
+      slot({ at: 99, model: 'claude-haiku-5-5', data: { atis: 'dba' } }),
+    )
+    expect(readExperiment(c, 'claude-opus-5-5[1m]', 'cli')).toEqual({
+      state: 'active',
+      id: 'eab',
+      model: 'claude-opus-5-5',
+      updatedAt: 9,
+      firstSeenAt: 0,
+    })
+  })
+
+  test("prefers the session's own entrypoint, and a slot without an ID is no experiment", async () => {
+    const c = config(slot({ at: 9, data: { atis: '34e000' } }), slot({ at: 5, entrypoint: 'claude-desktop' }))
+    expect(readExperiment(c, 'claude-opus-5-5', 'claude-desktop').state).toBe('none')
+    expect(readExperiment(c, 'claude-opus-5-5', 'sdk-ts').id).toBe('34e')
+  })
+
+  test('no slot, or no config, is unknown', async () => {
+    expect(readExperiment(config(), 'claude-opus-5-5', 'cli').state).toBe('unknown')
+    expect(readExperiment(null, 'claude-opus-5-5').state).toBe('unknown')
+  })
+
+  test('the row names the model and when it was seen', async () => {
+    expect(fmtModel('claude-opus-5-5')).toBe('Opus 5.5')
+    expect(fmtModel('claude-fable-5-2')).toBe('Fable 5.2')
+    expect(experimentRow(NOW + 3 * TTL_1H, { state: 'none', id: '', model: 'claude-opus-5-5', updatedAt: NOW, firstSeenAt: 0 })).toEqual({
+      value: 'None',
+      note: 'Opus 5.5 · updated 3h 0m ago',
+    })
+    expect(experimentRow(NOW, { state: 'unknown', id: '', model: '', updatedAt: 0, firstSeenAt: 0 }).value).toBe('Unknown')
+  })
+})
 
 test('the band shows the countdown on terminal and desktop', async ($, on) => {
   on('state.get', (_, e) => {
@@ -137,6 +199,8 @@ test('the settings pane draws every mode on terminal and desktop', async ($, on)
       if (m !== 'notify') expect(await ui.find({ key: 'min' })).toBeDefined()
       if (m === 'handoff') expect(await ui.find({ key: 'skill' })).toBeDefined()
       if (m === 'warm') expect(await ui.find({ type: 'Text', text: /^Keeps warm in 1 min$/ })).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: /^34e$/ })).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: /^Opus 5\.5 · first seen / })).toBeDefined()
       await ui.unmount()
     }
   }
