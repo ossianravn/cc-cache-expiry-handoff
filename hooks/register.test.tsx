@@ -12,6 +12,8 @@ import {
   fmtModel,
   inferTtl,
   leadMs,
+  liveRecord,
+  nextAction,
   normalizeSettings,
   readExperiment,
   rowNotes,
@@ -22,6 +24,35 @@ const NOW = 10_000_000
 
 const snap = (over = {}) => ({ ...EMPTY_SNAP, lastAt: NOW, read: 150_000, wrote: 2_000, fresh: 300, model: 'm', ...over })
 const run = (over = {}) => ({ ...IDLE_RUN, armed: true, activeSince: NOW, ...over })
+
+describe('companion status', () => {
+  test('names the next action and when it runs', async () => {
+    const s = { ...DEFAULT_SETTINGS, mode: 'warm-handoff' as const, warmForMin: 30, leadSec: 120 }
+    expect(nextAction(s, snap(), run())).toEqual({ kind: 'warm', at: NOW + TTL_5M - 2 * MIN })
+    expect(nextAction(s, snap(), run({ activeSince: NOW - 40 * MIN }))).toEqual({ kind: 'handoff', at: NOW + TTL_5M - 2 * MIN })
+    expect(nextAction({ ...s, mode: 'handoff' }, snap({ read: 5_000 }), run())?.kind).toBe('notify')
+  })
+
+  test('has no next action mid-turn, paused or once acted', async () => {
+    expect(nextAction(DEFAULT_SETTINGS, snap(), run({ isWorking: true }))).toBe(null)
+    expect(nextAction(DEFAULT_SETTINGS, snap(), run({ paused: true }))).toBe(null)
+    expect(nextAction(DEFAULT_SETTINGS, snap(), run({ armed: false }))).toBe(null)
+  })
+
+  test('reports expiry, tokens and where the session runs', async () => {
+    const live = liveRecord(DEFAULT_SETTINGS, snap({ autoTtlMs: TTL_1H, autoTtlSource: 'subscription' }), run(), {
+      sessionId: 'abc',
+      cwd: 'C:/p',
+      orcaPane: 'tab:pane',
+      entrypoint: 'cli',
+    })
+    expect(live.expiresAt).toBe(NOW + TTL_1H)
+    expect(live.tokens).toBe(152_300)
+    expect(live.ttlSource).toBe('subscription')
+    expect(live.orcaPane).toBe('tab:pane')
+    expect(liveRecord(DEFAULT_SETTINGS, EMPTY_SNAP, IDLE_RUN, { sessionId: 'x', cwd: '', orcaPane: '', entrypoint: '' }).expiresAt).toBe(0)
+  })
+})
 
 describe('decide', () => {
   test('does nothing until the lead time', async () => {

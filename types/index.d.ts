@@ -74,7 +74,44 @@ export type CacheExperiment = {
   firstSeenAt: number
 }
 
-export type CacheLogKind = 'warm' | 'handoff' | 'notify' | 'expired' | 'error' | 'guard' | 'ttl'
+/**
+ * One session's cache status for companions such as the Orca plugin: written to
+ * `<Claude config dir>/cache-expiry-handoff/sessions/<sessionId>.json`, and only
+ * while that folder exists (a companion creates it). Times are epoch ms. A
+ * breaking change bumps `v`.
+ */
+export type CacheLive = {
+  v: 1
+  sessionId: string
+  /** The session's working directory. */
+  cwd: string
+  /** `ORCA_PANE_KEY` when the session runs in an Orca terminal, else ''. */
+  orcaPane: string
+  /** `CLAUDE_CODE_ENTRYPOINT`: `cli`, `claude-desktop`, `sdk-ts`, ... or ''. */
+  entrypoint: string
+  model: string
+  tokens: number
+  /** Share of the last request read from the cache, 0–1. */
+  hit: number
+  lastAt: number
+  ttlMs: number
+  ttlSource: string
+  /** `lastAt + ttlMs`; 0 before the first request. */
+  expiresAt: number
+  mode: CacheMode
+  /** The next before-expiry action and when it runs; null when none is due. */
+  next: { kind: 'warm' | 'handoff' | 'notify'; at: number } | null
+  phase: CacheRun['phase']
+  paused: boolean
+  working: boolean
+  pings: number
+  /** Written at least once a minute while the session runs. */
+  updatedAt: number
+  /** When the session ended or was cleared; 0 while it runs. */
+  endedAt: number
+}
+
+export type CacheLogKind ='warm' | 'handoff' | 'notify' | 'expired' | 'error' | 'guard' | 'ttl'
 
 export type CacheLogEntry = { at: number; kind: CacheLogKind; text: string }
 

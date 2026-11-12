@@ -1,7 +1,7 @@
 // Pure logic of the mod: defaults, the cache lifetime, the decision of what to
 // do before expiry, and formatting. No `$` here, so it is easy to test.
 
-import type { CacheExperiment, CacheLogEntry, CacheMode, CacheRun, CacheSettings, CacheSnapshot, CacheTtlChoice } from '../types'
+import type { CacheExperiment, CacheLive, CacheLogEntry, CacheMode, CacheRun, CacheSettings, CacheSnapshot, CacheTtlChoice } from '../types'
 
 export const MIN = 60_000
 export const TTL_5M = 5 * MIN
@@ -220,11 +220,15 @@ export type Schedule = {
   thenIn: number
 }
 
+/** Armed, idle and counting from a reply: mid-turn the last request predates the message. */
+export function isArmedIdle(snap: CacheSnapshot, run: CacheRun): boolean {
+  return snap.lastAt > 0 && run.armed && !run.paused && !run.isWorking && snap.lastAt >= run.activeSince
+}
+
 export function schedule(now: number, s: CacheSettings, snap: CacheSnapshot, run: CacheRun): Schedule {
   const ttl = ttlMs(s, snap)
   const cycle = ttl - leadMs(s, ttl)
-  // Mid-turn the last request predates the message: count from the reply to come instead.
-  const isLive = snap.lastAt > 0 && run.armed && !run.paused && !run.isWorking && snap.lastAt >= run.activeSince
+  const isLive = isArmedIdle(snap, run)
   const lastAt = isLive ? snap.lastAt : 0
   const since = isLive ? run.activeSince : 0
   const from = isLive ? now : 0
@@ -235,6 +239,44 @@ export function schedule(now: number, s: CacheSettings, snap: CacheSnapshot, run
     firstIn: Math.max(0, lastAt + cycle - from),
     pings: k - 1,
     thenIn: Math.max(0, lastAt + k * cycle - from),
+  }
+}
+
+/** The next before-expiry action and when it runs, as `decide` will run it; null when none is due. */
+export function nextAction(s: CacheSettings, snap: CacheSnapshot, run: CacheRun): CacheLive['next'] {
+  if (!isArmedIdle(snap, run)) return null
+  const ttl = ttlMs(s, snap)
+  const at = snap.lastAt + ttl - leadMs(s, ttl)
+  if (s.mode === 'notify' || prefixTokens(snap) < s.minTokens) return { kind: 'notify', at }
+  if (s.mode === 'handoff') return { kind: 'handoff', at }
+  if (at - run.activeSince < s.warmForMin * MIN) return { kind: 'warm', at }
+  return { kind: s.mode === 'warm-handoff' ? 'handoff' : 'notify', at }
+}
+
+/** The status a companion reads; `updatedAt` and `endedAt` are the caller's. */
+export function liveRecord(
+  s: CacheSettings,
+  snap: CacheSnapshot,
+  run: CacheRun,
+  meta: { sessionId: string; cwd: string; orcaPane: string; entrypoint: string },
+): Omit<CacheLive, 'updatedAt' | 'endedAt'> {
+  const ttl = ttlMs(s, snap)
+  return {
+    v: 1,
+    ...meta,
+    model: snap.model,
+    tokens: prefixTokens(snap),
+    hit: Math.round(hitRate(snap) * 100) / 100,
+    lastAt: snap.lastAt,
+    ttlMs: ttl,
+    ttlSource: ttlSource(s, snap),
+    expiresAt: snap.lastAt > 0 ? snap.lastAt + ttl : 0,
+    mode: s.mode,
+    next: nextAction(s, snap, run),
+    phase: run.phase,
+    paused: run.paused,
+    working: run.isWorking,
+    pings: run.pings,
   }
 }
 

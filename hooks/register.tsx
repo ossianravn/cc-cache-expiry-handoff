@@ -22,6 +22,8 @@ import {
   hitRate,
   inferTtl,
   leadMs,
+  liveRecord,
+  nextAction,
   normalizeSettings,
   prefixTokens,
   pushLog,
@@ -96,6 +98,51 @@ async function restoreSnap($: $): Promise<boolean> {
   if (typeof snap.lastAt !== 'number' || snap.lastAt <= 0) return false
   await update($, snapA, () => snap)
   return true
+}
+
+// ---------- status for companions ----------
+
+// While `<Claude config dir>/cache-expiry-handoff/sessions` exists (the Orca plugin
+// creates it), each session writes its status there: on every change, and once a
+// minute so a companion can tell the session still runs. Nothing is written otherwise.
+const HEARTBEAT_MS = 60_000
+let liveDir = ''
+let liveDirCheckedAt = 0
+let liveMeta = { cwd: '', orcaPane: '', entrypoint: '' }
+let lastLive = ''
+let lastLiveAt = 0
+let liveChain: Promise<void> = Promise.resolve()
+
+async function findLiveDir($: $): Promise<string> {
+  const config = await $.env.get('CLAUDE_CONFIG_DIR')
+  const home = (await $.env.get('USERPROFILE')) || (await $.env.get('HOME'))
+  const base = (config || (home ? `${home.replace(/[\\/]+$/, '')}/.claude` : '')).replace(/[\\/]+$/, '')
+  if (!base) return ''
+  const dir = `${base}/cache-expiry-handoff/sessions`
+  return (await $.fs.exists(dir)) ? dir : ''
+}
+
+/** Writes this session's status when it changed or a minute has passed; `endedAt` marks it ended. */
+function publish($: $, endedAt = 0): Promise<void> {
+  liveChain = liveChain.then(() => writeLive($, endedAt)).catch(() => undefined)
+  return liveChain
+}
+
+async function writeLive($: $, endedAt: number) {
+  const now = await $.clock.now()
+  if (!liveDir && now - liveDirCheckedAt >= HEARTBEAT_MS) {
+    liveDirCheckedAt = now
+    liveDir = await findLiveDir($)
+  }
+  if (!liveDir || !sessionId) return
+  const [s, snap, run] = await Promise.all([read($, settingsA), read($, snapA), read($, runA)])
+  if (snap.lastAt === 0 && !lastLive) return
+  const body = JSON.stringify(liveRecord(s, snap, run, { sessionId, ...liveMeta }))
+  if (!endedAt && body === lastLive && now - lastLiveAt < HEARTBEAT_MS) return
+  const record = { ...JSON.parse(body), updatedAt: now, endedAt }
+  await $.fs.write(`${liveDir}/${sessionId}.json`, JSON.stringify(record))
+  lastLive = endedAt ? '' : body
+  lastLiveAt = now
 }
 
 async function setSettings($: $, patch: Partial<CacheSettings>) {
@@ -221,6 +268,7 @@ async function afterHandoffTurn($: $, isAborted: boolean) {
 
 async function tick($: $) {
   const [s, snap, run] = await Promise.all([read($, settingsA), read($, snapA), read($, runA)])
+  void publish($)
   const now = await $.clock.now()
   // While a turn runs the band reads "in use"; skip the per-second redraw.
   if (snap.lastAt > 0 && !run.isWorking) await update($, nowA, () => now)
@@ -284,6 +332,12 @@ export const register: Register = on => {
       description: 'Prompt cache: countdown, before-expiry action and settings',
       argumentHint: '[warm | handoff | pause | resume | mode <notify|warm|handoff|warm-handoff>]',
     })
+    liveMeta = {
+      cwd: await $.session.cwd(),
+      orcaPane: (await $.env.get('ORCA_PANE_KEY')) ?? '',
+      entrypoint: (await $.env.get('CLAUDE_CODE_ENTRYPOINT')) ?? '',
+    }
+    liveDirCheckedAt = 0
     ticker?.cancel()
     ticker = $.clock.every(1000, () => void tick($).catch(() => undefined))
     void refreshExperiment($)
@@ -301,6 +355,7 @@ export const register: Register = on => {
   })
 
   on('session.end', async ($, e, next) => {
+    await publish($, await $.clock.now())
     if (e.reason === 'clear') {
       await setSnap($, () => EMPTY_SNAP)
       await update($, runA, r => ({ ...IDLE_RUN, paused: r.paused }))
@@ -429,7 +484,7 @@ export const register: Register = on => {
     const meta = isCold
       ? `next message rewrites ${tokens} tokens`
       : `${fmtTtlShort(ttl)} · ${hit}% hit · ${tokens} cached`
-    const plan = planText(s, run, lead)
+    const plan = planText(s, snap, run, lead)
 
     const bar =
       e.surface === 'desktop' && 'Svg' in ui ? (
@@ -588,7 +643,7 @@ export const register: Register = on => {
           ) : null}
           {hasData ? (
             <Text dimColor wrap="truncate-end">
-              Last reply {fmtAgo(now - snap.lastAt)} · {planText(s, run, lead) || 'nothing scheduled'}
+              Last reply {fmtAgo(now - snap.lastAt)} · {planText(s, snap, run, lead) || 'nothing scheduled'}
             </Text>
           ) : null}
         </Box>
@@ -712,7 +767,7 @@ async function openPane($: $) {
   await $.ui.open({ id: PANE, title: 'Prompt cache', focus: true, closeOnEscape: true, rows: 30, columns: 64 })
 }
 
-function planText(s: CacheSettings, run: CacheRun, lead: number): string {
+function planText(s: CacheSettings, snap: CacheSnapshot, run: CacheRun, lead: number): string {
   if (run.paused) return 'paused'
   if (run.phase === 'handed-off') return `handed off to /${s.skill}`
   if (run.phase === 'notified') return 'you were notified'
@@ -720,12 +775,10 @@ function planText(s: CacheSettings, run: CacheRun, lead: number): string {
   const warmed = run.phase === 'warming' && run.pings > 0 ? `kept warm ×${run.pings}` : ''
   if (!run.armed) return warmed
   const at = fmtClock(lead)
-  const action =
-    s.mode === 'notify'
-      ? `notifies at ${at}`
-      : s.mode === 'handoff'
-        ? `/${s.skill} at ${at}`
-        : `warms at ${at}`
+  // Mid-turn there is no next action yet: name what the mode would do.
+  const fallback = s.mode === 'notify' ? 'notify' : s.mode === 'handoff' ? 'handoff' : 'warm'
+  const kind = nextAction(s, snap, run)?.kind ?? fallback
+  const action = kind === 'notify' ? `notifies at ${at}` : kind === 'handoff' ? `/${s.skill} at ${at}` : `warms at ${at}`
   return warmed ? `${warmed} · ${action}` : action
 }
 

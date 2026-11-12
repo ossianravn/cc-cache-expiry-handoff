@@ -172,6 +172,10 @@ The band draws as text:
 
 The settings pane opens inline above the prompt, with the same controls.
 
+### In Orca
+
+The mod works unchanged in [Orca](https://orca.dev)'s terminals. To see every session at once, add the [Orca plugin](https://github.com/ossianravn/orca-cache-expiry). It puts the cache of the session that expires first in Orca's status bar, and lists all sessions in a sidebar panel.
+
 ## Cache lifetime
 
 On **Auto**, the mod works out the lifetime in this order:
@@ -246,7 +250,7 @@ claude --plugin-dir .
 | `hooks/logic.ts` | Lifetime detection, the before-expiry decision, the schedule and the pane's lines. Pure functions, no Claude Code API. |
 | `hooks/register.tsx` | The hooks, the band and the settings pane. |
 | `hooks/register.test.tsx` | Tests for both. |
-| `types/index.d.ts` | The mod's settings and state types. |
+| `types/index.d.ts` | The mod's settings and state types, and `CacheLive`, the status file companions read. |
 
 Issues and pull requests are welcome.
 
