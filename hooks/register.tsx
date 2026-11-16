@@ -622,10 +622,27 @@ export const register: Register = on => {
       )
     // A group: its title, its rows, then what the rows mean in plain sentences, one per line.
     const sentence = (t: string) => (/[.!?]$/.test(t) ? t : `${t}.`)
+    // On graphical surfaces a group's rows sit on a shaded panel; a translucent grey reads in light and dark.
+    const panel = (rows: RenderChildren[]) =>
+      isTerminal ? (
+        rows.filter(Boolean)
+      ) : (
+        <Box
+          flexDirection="column"
+          gap={rowGap}
+          backgroundColor="#8080801a"
+          borderStyle="round"
+          borderColor="#80808033"
+          paddingX={2}
+          paddingY={1}
+        >
+          {rows.filter(Boolean)}
+        </Box>
+      )
     const group = (title: string, rows: RenderChildren[], notes: (string | undefined)[]) => (
       <Box flexDirection="column" gap={rowGap}>
         <Text weight="semibold">{title}</Text>
-        {rows.filter(Boolean)}
+        {panel(rows)}
         {notes.some(Boolean) ? (
           <Box flexDirection="column">
             {notes
