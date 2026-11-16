@@ -10,8 +10,8 @@ export type CacheSettings = {
   mode: CacheMode
   /** Seconds before expiry the action runs. */
   leadSec: number
-  /** Minutes of idle time keep-warm covers before it stops (or hands off). */
-  warmForMin: number
+  /** How many keep-warms run while the person is away, before After that (notify or hand off). */
+  warmTimes: number
   /** Slash command or skill run by the handoff modes, without the slash. */
   skill: string
   /** Arguments passed to the handoff skill. */
@@ -46,6 +46,8 @@ export type CacheRun = {
   /** When the person last sent something: keep-warm counts its budget from here. */
   activeSince: number
   pings: number
+  /** Automatic keep-warms since the person's last message; `warmTimes` caps them. */
+  awayPings?: number
   pingRead: number
   isWorking: boolean
   isActing: boolean
@@ -125,9 +127,7 @@ declare module 'claude-code' {
       now: number
       skills: string[]
       exp: CacheExperiment
-      /** The time the pane counts from: the tick's `now`, held while the person types in the pane. */
-      paneNow: number
-      /** Until when the pane holds its clock: focus or typing in the Instructions field sets it a minute ahead. */
+      /** Until when the countdown holds: focus or typing in one of the pane's controls sets it a minute ahead. */
       editUntil: number
     }
   }

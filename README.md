@@ -70,7 +70,7 @@ The band appears above the prompt after Claude's next reply.
 
 1. **Send a message.** Once Claude replies, the band starts counting down.
 2. **Press Settings** on the band, or run `/cache-expiry`.
-3. **Pick an action.** **Keep warm** with **While away: 1 h** is a good start. With a 1-hour cache, that's one keep-warm each time you step away.
+3. **Pick an action.** **Keep warm** with **Repeat: Once** is a good start. With a 1-hour cache, that keeps it warm about an hour longer each time you step away.
 
 ## How it works
 
@@ -79,22 +79,22 @@ flowchart TD
   A(["Claude replies: the countdown starts"]) --> C(["2 min before expiry"])
   C -->|Notify| D["Toast and<br/>system alert"]
   C -->|Hand off| E["Runs your skill,<br/>e.g. /handoff"]
-  C -->|Keep warm| F["Away less than<br/>While away?"]
+  C -->|Keep warm| F["Fewer keep-warms<br/>than Repeat?"]
   F -->|yes| G["Silent keep-warm<br/>resets the timer"]
   G --> C
   F -->|no| H["After that:<br/>Notify or Hand off"]
   E -.->|"After handoff:<br/>Clear session"| I["/clear"]
 ```
 
-Notify and Hand off run once per idle stretch, and Keep warm repeats until **While away** runs out. Your next message starts a new stretch.
+Notify and Hand off run once per idle stretch, and Keep warm runs as many times as **Repeat** says. Your next message starts a new stretch.
 
-**Keep warm, step by step**, with a 1-hour cache, **When: 2 min before** and **While away: 1 h**:
+**Keep warm, step by step**, with a 1-hour cache, **When: 2 min before** and **Repeat: Once**:
 
 | Time since your last message | What happens |
 | --- | --- |
 | 0 | Claude replies. The cache has 60 minutes left. |
-| 58 min | You've been away less than 1 h, so it keeps the cache warm. The cache now runs to 118 min. |
-| 116 min | You've been away more than 1 h, so it does **After that** (notify or hand off). |
+| 58 min | No keep-warm yet in this stretch, so it keeps the cache warm. The cache now runs to 118 min. |
+| 116 min | The one keep-warm is used, so it does **After that** (notify or hand off). |
 | 118 min | The cache expires. |
 
 A keep-warm is a tool-less, one-word request sent over the session's own transcript. It reads the cached prompt, which resets the cache's timer, and its answer is thrown away.
@@ -116,8 +116,8 @@ Open the pane with **Settings** on the band or with `/cache-expiry`. Settings ar
 | --- | --- | --- |
 | Action | Notify | Notify, Keep warm or Hand off. |
 | When | 2 min before | How long before expiry the action runs (2 to 15 min). |
-| While away | 1 h | Keep warm only: how long after your last message it keeps the cache warm. |
-| After that | Notify | Keep warm only: what happens once that time is up. |
+| Repeat | Once | Keep warm only: how many keep-warms run each time you step away (once to 20 times). |
+| After that | Notify | Keep warm only: what happens once they're used. |
 | Handoff skill | `/handoff` | The skill or slash command to run. |
 | Instructions | *(a short note)* | Text passed to the skill as its arguments. |
 | After handoff | Keep session | **Clear session** runs `/clear` once the skill finishes. |
@@ -193,15 +193,15 @@ The pane shows what it detected and why, such as *Detected: 1 hour (observed)*.
 
 Each keep-warm reads the cached prompt at the cache-read rate, about a tenth of the normal input price, and answers with one word. The pane shows the estimate before it runs, such as *1 keep-warm ≈ 9k tokens at full price*, and totals what it has spent.
 
-How many keep-warms **While away** costs, with **When: 2 min before**:
+How much longer **Repeat** keeps the cache warm, with **When: 2 min before**:
 
-| While away | 1-hour cache | 5-minute cache |
+| Repeat | 1-hour cache | 5-minute cache |
 | --- | --- | --- |
-| 1 h | 1 | 19 |
-| 8 h | 8 | 159 |
-| 24 h | 24 | 479 |
+| Once | 58 min | 3 min |
+| 5 times | 4 h 50 min | 15 min |
+| 20 times | 19 h 20 min | 1 h |
 
-With a 1-hour cache, even 24 hours costs about as much as one expired rewrite. With a 5-minute cache, keep **While away** short.
+With a 1-hour cache, rewriting an expired cache costs about as much as 20 keep-warms, so even **Repeat: 20 times** costs about one rewrite. With a 5-minute cache, each keep-warm buys only 3 minutes.
 
 ## FAQ
 

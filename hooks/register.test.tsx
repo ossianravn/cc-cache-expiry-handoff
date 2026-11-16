@@ -27,9 +27,9 @@ const run = (over = {}) => ({ ...IDLE_RUN, armed: true, activeSince: NOW, ...ove
 
 describe('companion status', () => {
   test('names the next action and when it runs', async () => {
-    const s = { ...DEFAULT_SETTINGS, mode: 'warm-handoff' as const, warmForMin: 30, leadSec: 120 }
+    const s = { ...DEFAULT_SETTINGS, mode: 'warm-handoff' as const, warmTimes: 1, leadSec: 120 }
     expect(nextAction(s, snap(), run())).toEqual({ kind: 'warm', at: NOW + TTL_5M - 2 * MIN })
-    expect(nextAction(s, snap(), run({ activeSince: NOW - 40 * MIN }))).toEqual({ kind: 'handoff', at: NOW + TTL_5M - 2 * MIN })
+    expect(nextAction(s, snap(), run({ awayPings: 1 }))).toEqual({ kind: 'handoff', at: NOW + TTL_5M - 2 * MIN })
     expect(nextAction({ ...s, mode: 'handoff' }, snap({ read: 5_000 }), run())?.kind).toBe('notify')
   })
 
@@ -65,11 +65,11 @@ describe('decide', () => {
     expect(decide(at, DEFAULT_SETTINGS, snap(), run({ armed: false })).kind).toBe('none')
   })
 
-  test('keeps warm inside the idle budget, then hands off', async () => {
-    const s = { ...DEFAULT_SETTINGS, mode: 'warm-handoff' as const, warmForMin: 30 }
+  test('keeps warm as many times as Repeat says, then hands off', async () => {
+    const s = { ...DEFAULT_SETTINGS, mode: 'warm-handoff' as const, warmTimes: 2 }
     const at = NOW + TTL_5M - 50_000
-    expect(decide(at, s, snap(), run()).kind).toBe('warm')
-    expect(decide(at, s, snap(), run({ activeSince: NOW - 40 * MIN })).kind).toBe('handoff')
+    expect(decide(at, s, snap(), run({ awayPings: 1 })).kind).toBe('warm')
+    expect(decide(at, s, snap(), run({ awayPings: 2 })).kind).toBe('handoff')
   })
 
   test('only notifies for a small context', async () => {
@@ -128,7 +128,6 @@ const STORED: Record<string, unknown> = {
   run: { shape: 'run-1', value: run() },
   settings: { shape: 'settings-1', value: DEFAULT_SETTINGS },
   now: NOW + 2 * MIN,
-  paneNow: NOW + 2 * MIN,
   exp: { state: 'active', id: '34e', model: 'claude-opus-5-5', updatedAt: NOW, firstSeenAt: NOW },
 }
 
@@ -177,14 +176,16 @@ describe('experiment', () => {
   })
 })
 
-test('the band shows the countdown on terminal and desktop', async ($, on) => {
+test('the band counts down the seconds in its own region on terminal and desktop', async ($, on) => {
   on('state.get', (_, e) => {
     const key = (e as { key: string }).key
     return key in STORED ? { value: { value: STORED[key], version: 1 } } : { value: { value: undefined, version: 0 } }
   })
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...BAND, surface })
-    expect((await ui.find({ type: 'Text', text: /^3:00$/ }))?.text).toBe('3:00')
+    expect((await ui.find({ type: 'Text', text: /^3:00$/, in: 'countdown' }))?.text).toBe('3:00')
+    await ui.advance(5000)
+    expect((await ui.find({ type: 'Text', text: /^2:55$/, in: 'countdown' }))?.text).toBe('2:55')
     expect(await ui.find({ type: 'Text', text: /notifies at 2:00/ })).toBeDefined()
     await ui.unmount()
   }
@@ -227,7 +228,7 @@ test('the settings pane draws every mode on terminal and desktop', async ($, on)
     for (const surface of ['terminal', 'desktop'] as const) {
       const ui = await $.ui.mount({ ...PANE, surface })
       expect(await ui.find({ type: 'Text', text: /Before it expires/ })).toBeDefined()
-      expect(await ui.find({ type: 'Text', text: /^3:00 left$/ })).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: /^Warm$/ })).toBeDefined()
       if (m !== 'notify') expect(await ui.find({ key: 'min' })).toBeDefined()
       if (m === 'handoff') expect(await ui.find({ key: 'skill' })).toBeDefined()
       if (m === 'warm') expect(await ui.find({ type: 'Text', text: /^Keeps warm in 1 min\.$/ })).toBeDefined()
@@ -243,15 +244,21 @@ test('settings keep a valid Afterwards choice and drop a bad one', async () => {
   expect(normalizeSettings({ afterHandoff: 'nuke' }).afterHandoff).toBe('stay')
 })
 
+test('a saved keep-warm time budget carries over as one keep-warm per started hour', async () => {
+  expect(normalizeSettings({ warmForMin: 30 }).warmTimes).toBe(1)
+  expect(normalizeSettings({ warmForMin: 480 }).warmTimes).toBe(8)
+  expect(normalizeSettings({ warmForMin: 480, warmTimes: 3 }).warmTimes).toBe(3)
+})
+
 test('a saved lead under 2 minutes rises to 2 minutes', async () => {
   expect(normalizeSettings({ leadSec: 60 }).leadSec).toBe(120)
   expect(normalizeSettings({ leadSec: 300 }).leadSec).toBe(300)
 })
 
 describe('schedule and row notes', () => {
-  const hour = { ...DEFAULT_SETTINGS, ttl: '1h' as const, mode: 'warm-handoff' as const, warmForMin: 60 }
+  const hour = { ...DEFAULT_SETTINGS, ttl: '1h' as const, mode: 'warm-handoff' as const, warmTimes: 1 }
 
-  test('a 1-hour cache kept warm for 1 h: one keep-warm, then the handoff at 1 h 56 min', async () => {
+  test('a 1-hour cache kept warm once: one keep-warm, then the handoff at 1 h 56 min', async () => {
     const plan = schedule(0, hour, EMPTY_SNAP, IDLE_RUN)
     expect(plan).toEqual({ isLive: false, firstIn: 58 * MIN, pings: 1, thenIn: 116 * MIN })
     const notes = rowNotes(0, hour, EMPTY_SNAP, IDLE_RUN)
@@ -259,14 +266,15 @@ describe('schedule and row notes', () => {
     expect(notes.then).toBe('Runs /handoff 1 h 56 min after each reply')
   })
 
-  test('a 5-minute cache kept warm for 1 h pings every 3 minutes', async () => {
-    expect(schedule(0, { ...hour, ttl: '5m' }, EMPTY_SNAP, IDLE_RUN).pings).toBe(19)
+  test('a 5-minute cache kept warm 20 times keeps it about an hour longer', async () => {
+    expect(schedule(0, { ...hour, ttl: '5m', warmTimes: 20 }, EMPTY_SNAP, IDLE_RUN)).toEqual({ isLive: false, firstIn: 3 * MIN, pings: 20, thenIn: 63 * MIN })
+    expect(rowNotes(0, { ...hour, ttl: '5m', warmTimes: 20 }, EMPTY_SNAP, IDLE_RUN).away).toBe('Keeps it warm 1 h longer.')
   })
 
-  test('a budget shorter than the cache needs no keep-warm', async () => {
-    const notes = rowNotes(0, { ...hour, warmForMin: 15 }, EMPTY_SNAP, IDLE_RUN)
-    expect(notes.away).toBe('No keep-warm fits: the 1 hour cache outlasts it.')
-    expect(notes.when).toBe('Runs /handoff 58 min after each reply')
+  test('once a stretch away has used its keep-warms, After that runs next', async () => {
+    const notes = rowNotes(NOW + 10 * MIN, hour, snap(), run({ awayPings: 1 }))
+    expect(notes.away).toBe('Keep-warms used until your next message.')
+    expect(notes.when).toBe('Runs /handoff in 48 min')
     expect(notes.then).toBeUndefined()
   })
 
@@ -274,7 +282,7 @@ describe('schedule and row notes', () => {
     const notes = rowNotes(NOW + 10 * MIN, hour, snap(), run())
     expect(notes.when).toBe('Keeps warm in 48 min')
     expect(notes.then).toBe('Runs /handoff in 1 h 46 min')
-    expect(notes.away).toBe('1 keep-warm ≈ 15k tokens at full price')
+    expect(notes.away).toBe('Keeps it warm 58 min longer for ≈ 15k tokens at full price.')
     expect(notes.skip).toBe('This session: 152k tokens')
     expect(notes.cold).toBe('Rewriting 152k tokens costs ≈ 20× a warm read.')
   })
@@ -285,6 +293,6 @@ describe('schedule and row notes', () => {
     // Mid-turn the last request is older than the message: no countdown from it.
     const midTurn = rowNotes(NOW + 4 * TTL_1H, hour, snap(), run({ activeSince: NOW + 4 * TTL_1H, isWorking: true }))
     expect(midTurn.when).toBe('Keeps warm 58 min after each reply')
-    expect(midTurn.away).toBe('1 keep-warm ≈ 15k tokens at full price')
+    expect(midTurn.away).toBe('Keeps it warm 58 min longer for ≈ 15k tokens at full price.')
   })
 })

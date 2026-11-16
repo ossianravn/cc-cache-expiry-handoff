@@ -16,7 +16,7 @@ export const PING_PROMPT = 'Reply with the single word: warm'
 export const DEFAULT_SETTINGS: CacheSettings = {
   mode: 'notify',
   leadSec: MIN_LEAD_SEC,
-  warmForMin: 60,
+  warmTimes: 1,
   skill: 'handoff',
   skillArgs:
     'The prompt cache is about to expire. Write the handoff now so a fresh session can continue this work.',
@@ -69,7 +69,9 @@ export function normalizeSettings(raw: unknown): CacheSettings {
   const r = raw as Record<string, unknown>
   if (typeof r.mode === 'string' && MODE_VALUES.includes(r.mode)) s.mode = r.mode as CacheMode
   if (isNum(r.leadSec)) s.leadSec = Math.min(Math.max(Math.round(r.leadSec), MIN_LEAD_SEC), 30 * 60)
-  if (isNum(r.warmForMin)) s.warmForMin = Math.min(Math.max(Math.round(r.warmForMin), 1), 7 * 24 * 60)
+  if (isNum(r.warmTimes)) s.warmTimes = Math.min(Math.max(Math.round(r.warmTimes), 1), 50)
+  // Earlier versions saved a time budget (`warmForMin`): it carries over as one keep-warm per started hour.
+  else if (isNum(r.warmForMin)) s.warmTimes = Math.min(Math.max(Math.ceil(r.warmForMin / 60), 1), 24)
   if (typeof r.skill === 'string' && r.skill.trim()) s.skill = r.skill.trim().replace(/^\//, '')
   if (typeof r.skillArgs === 'string') s.skillArgs = r.skillArgs
   if (typeof r.ttl === 'string' && TTL_VALUES.includes(r.ttl)) s.ttl = r.ttl as CacheTtlChoice
@@ -198,9 +200,8 @@ export function decide(now: number, s: CacheSettings, snap: CacheSnapshot, run: 
   if (isSmall) return { kind: 'notify', reason: 'small' }
   if (mode === 'handoff') return { kind: 'handoff' }
 
-  // Keep-warm modes: ping while the idle budget lasts.
-  const idleFor = now - run.activeSince
-  if (idleFor < s.warmForMin * MIN) return { kind: 'warm' }
+  // Keep-warm modes: keep warm until this stretch away has used its keep-warms.
+  if ((run.awayPings ?? 0) < s.warmTimes) return { kind: 'warm' }
   return mode === 'warm-handoff' ? { kind: 'handoff' } : { kind: 'notify', reason: 'budget' }
 }
 
@@ -214,9 +215,9 @@ export type Schedule = {
   isLive: boolean
   /** Until the first action: from now when live, else from a reply. */
   firstIn: number
-  /** Keep-warms still to come before the idle budget runs out (warm modes). */
+  /** Keep-warms still to come in this stretch away (warm modes). */
   pings: number
-  /** Until the budget's end, when Then runs (warm modes). */
+  /** Until After that runs, once the keep-warms are used (warm modes). */
   thenIn: number
 }
 
@@ -230,15 +231,14 @@ export function schedule(now: number, s: CacheSettings, snap: CacheSnapshot, run
   const cycle = ttl - leadMs(s, ttl)
   const isLive = isArmedIdle(snap, run)
   const lastAt = isLive ? snap.lastAt : 0
-  const since = isLive ? run.activeSince : 0
   const from = isLive ? now : 0
-  // Keep-warms run at lastAt + k·cycle while (that − since) < budget; the first k past it runs Then.
-  const k = Math.max(1, Math.ceil((since + s.warmForMin * MIN - lastAt) / cycle))
+  // The n keep-warms left run at lastAt + 1..n cycles; After that runs one cycle after the last.
+  const n = Math.max(0, s.warmTimes - (isLive ? (run.awayPings ?? 0) : 0))
   return {
     isLive,
     firstIn: Math.max(0, lastAt + cycle - from),
-    pings: k - 1,
-    thenIn: Math.max(0, lastAt + k * cycle - from),
+    pings: n,
+    thenIn: Math.max(0, lastAt + (n + 1) * cycle - from),
   }
 }
 
@@ -249,7 +249,7 @@ export function nextAction(s: CacheSettings, snap: CacheSnapshot, run: CacheRun)
   const at = snap.lastAt + ttl - leadMs(s, ttl)
   if (s.mode === 'notify' || prefixTokens(snap) < s.minTokens) return { kind: 'notify', at }
   if (s.mode === 'handoff') return { kind: 'handoff', at }
-  if (at - run.activeSince < s.warmForMin * MIN) return { kind: 'warm', at }
+  if ((run.awayPings ?? 0) < s.warmTimes) return { kind: 'warm', at }
   return { kind: s.mode === 'warm-handoff' ? 'handoff' : 'notify', at }
 }
 
@@ -302,7 +302,7 @@ export function rowNotes(now: number, s: CacheSettings, snap: CacheSnapshot, run
   const isSmall = hasData && tokens < s.minTokens
 
   const thenVerb = s.mode === 'warm-handoff' ? `Runs ${skill}` : 'Notifies you'
-  // With no keep-warm inside the budget, the first thing to run is Then.
+  // With the keep-warms used, the first thing to run is After that.
   const first =
     s.mode === 'notify' || isSmall
       ? 'Notifies you'
@@ -322,10 +322,8 @@ export function rowNotes(now: number, s: CacheSettings, snap: CacheSnapshot, run
   let then: string | undefined
   if (isWarm && !isSmall) {
     const n = plan.pings
-    away =
-      n === 0
-        ? `No keep-warm fits: the ${fmtTtl(ttl)} cache outlasts it.`
-        : `${n} keep-warm${n === 1 ? '' : 's'}${hasData ? ` ≈ ${fmtTokens(Math.round((n * tokens) / 10))} tokens at full price` : ''}`
+    const price = hasData ? ` for ≈ ${fmtTokens(Math.round((n * tokens) / 10))} tokens at full price` : ''
+    away = n === 0 ? 'Keep-warms used until your next message.' : `Keeps it warm ${fmtSpan(n * (ttl - lead))} longer${price}.`
     then = run.paused || (hasData && !run.armed) || n === 0 ? undefined : `${thenVerb} ${at(plan.thenIn)}`
   }
 

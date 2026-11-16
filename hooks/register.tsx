@@ -7,6 +7,7 @@ import {
   EMPTY_EXP,
   EMPTY_SNAP,
   IDLE_RUN,
+  MIN,
   MODES,
   PING_PROMPT,
   coldMultiple,
@@ -16,6 +17,7 @@ import {
   fmtAgo,
   fmtClock,
   fmtDuration,
+  fmtSpan,
   fmtTokens,
   fmtTtl,
   fmtTtlShort,
@@ -60,15 +62,30 @@ const logA = atom({ plugin: 'cache-expiry-handoff', key: 'log' } as const, [], {
 const nowA = atom({ plugin: 'cache-expiry-handoff', key: 'now' } as const, 0)
 const skillsA = atom({ plugin: 'cache-expiry-handoff', key: 'skills' } as const, [])
 const expA = atom({ plugin: 'cache-expiry-handoff', key: 'exp' } as const, EMPTY_EXP)
-// The pane counts from its own clock, held while the person is in the Instructions field: a redraw every
-// second rebuilds the field on graphical surfaces and can take the focus out from under their typing.
-// Focus leaving the pane raises no event, so the hold lapses a minute after the last focus or keystroke.
-const paneNowA = atom({ plugin: 'cache-expiry-handoff', key: 'paneNow' } as const, 0)
+// On graphical surfaces any redraw of the band rebuilds the settings pane too, which drops the focus of
+// a text field and redraws an open dropdown. So the per-second countdown holds while the person uses the
+// pane: while it has the keyboard (`$.ui.panes`), and for a minute after focus or typing reaches one of
+// its controls, in case a surface doesn't report the pane's focus.
 const editUntilA = atom({ plugin: 'cache-expiry-handoff', key: 'editUntil' } as const, 0)
 const EDIT_HOLD_MS = 60_000
 const holdPane = async ($: $) => {
   const now = await $.clock.now()
   await update($, editUntilA, () => now + EDIT_HOLD_MS)
+}
+
+/** What the band and pane show that changes with time: the minute, and whether the lead or expiry passed. */
+function clockStep(now: number, s: CacheSettings, snap: CacheSnapshot): string {
+  const left = remainingMs(now, s, snap)
+  return `${Math.floor(now / MIN)}|${left <= leadMs(s, ttlMs(s, snap))}|${left <= 0}`
+}
+
+async function isPaneInUse($: $, now: number): Promise<boolean> {
+  if (now < (await read($, editUntilA))) return true
+  try {
+    return (await $.ui.panes()).some(p => p.id === PANE && p.isShown && p.isFocused)
+  } catch {
+    return false
+  }
 }
 
 // ---------- state helpers ----------
@@ -218,7 +235,14 @@ async function warmNow($: $, s: CacheSettings, isManual = false) {
     if (r.isAnswered && r.usage.cache_read_input_tokens > 0) {
       const readTokens = r.usage.cache_read_input_tokens
       await setSnap($, v => ({ ...v, lastAt: at }))
-      await update($, runA, (v): CacheRun => ({ ...v, pings: v.pings + 1, pingRead: v.pingRead + readTokens, phase: 'warming' }))
+      // A manual keep-warm doesn't use up the ones Repeat allows while the person is away.
+      await update($, runA, (v): CacheRun => ({
+        ...v,
+        pings: v.pings + 1,
+        awayPings: (v.awayPings ?? 0) + (isManual ? 0 : 1),
+        pingRead: v.pingRead + readTokens,
+        phase: 'warming',
+      }))
       const wrote = r.usage.cache_creation_input_tokens
       await log($, 'warm', `Kept warm · read ${fmtTokens(readTokens)}${wrote > 1000 ? ` · wrote ${fmtTokens(wrote)}` : ''}`)
       if (isManual) $.ui.toast(`Cache kept warm: ${fmtTokens(readTokens)} tokens, timer reset`)
@@ -280,12 +304,12 @@ async function tick($: $) {
   const [s, snap, run] = await Promise.all([read($, settingsA), read($, snapA), read($, runA)])
   void publish($)
   const now = await $.clock.now()
-  // While a turn runs the band reads "in use"; skip the per-second redraw.
-  // While the person types in the pane's Instructions field nothing redraws: on graphical surfaces a
-  // redraw of the band rebuilds the pane too, and the field loses the focus.
-  if (snap.lastAt > 0 && !run.isWorking && now >= (await read($, editUntilA))) {
-    await update($, nowA, () => now)
-    await update($, paneNowA, () => now)
+  // The band's seconds tick in its countdown region (countdown.tsx); the hooks module redraws only when a
+  // minute turns or the band changes colour. While a turn runs the band reads "in use", and while the pane
+  // is in use it holds (see `editUntilA`): either way, skip even those.
+  if (snap.lastAt > 0 && !run.isWorking && !(await isPaneInUse($, now))) {
+    const drawn = await read($, nowA)
+    if (clockStep(now, s, snap) !== clockStep(drawn, s, snap)) await update($, nowA, () => now)
   }
   const action = decide(now, s, snap, run)
   const tokens = fmtTokens(prefixTokens(snap))
@@ -301,7 +325,7 @@ async function tick($: $) {
       await patchRun($, { armed: false, phase: 'notified' })
       const left = fmtClock(remainingMs(now, s, snap))
       const why =
-        action.reason === 'budget' ? ` Keep-warm stopped after ${fmtDuration(s.warmForMin * 60)} idle.` : ''
+        action.reason === 'budget' ? ` Kept warm ${s.warmTimes === 1 ? 'once' : `${s.warmTimes} times`}.` : ''
       await log($, 'notify', `Notified · ${left} left${why ? ' · keep-warm budget used' : ''}`)
       await alert($, s, `Prompt cache expires in ${left}: send a message to keep ${tokens} tokens cached.${why}`)
       return
@@ -437,7 +461,7 @@ export const register: Register = on => {
         return { drop: 'Not sent: the prompt cache had expired. /compact or /clear first makes the rewrite smaller.' }
       }
     }
-    await patchRun($, { armed: true, activeSince: now, phase: 'idle', handoffPending: false })
+    await patchRun($, { armed: true, activeSince: now, awayPings: 0, phase: 'idle', handoffPending: false })
     return next(e)
   }).catch(($, e, next) => next(e))
 
@@ -494,7 +518,15 @@ export const register: Register = on => {
     const hit = Math.round(hitRate(snap) * 100)
     const tokens = fmtTokens(prefixTokens(snap))
 
-    const time = isLive ? 'in use' : isCold ? `expired ${fmtAgo(-left)}` : fmtClock(left)
+    // Where the surface draws regions, the seconds tick there; elsewhere the time moves a minute at a time.
+    const time =
+      'Client' in ui ? (
+        <ui.Client key="countdown" module="./countdown.tsx" props={{ now, expiresAt: snap.lastAt + ttl, isLive }} />
+      ) : (
+        <Text tabular color={isCold ? 'error' : undefined} wrap="truncate-end">
+          {isLive ? 'in use' : isCold ? `expired ${fmtAgo(-left)}` : fmtSpan(left)}
+        </Text>
+      )
     const meta = isCold
       ? `next message rewrites ${tokens} tokens`
       : `${fmtTtlShort(ttl)} · ${hit}% hit · ${tokens} cached`
@@ -519,9 +551,7 @@ export const register: Register = on => {
           <Box flexShrink={0} width={e.surface === 'terminal' ? 12 : undefined}>
             {bar}
           </Box>
-          <Text tabular color={isCold ? 'error' : undefined} wrap="truncate-end">
-            {time}
-          </Text>
+          {time}
         </Box>
         <Box flexGrow={1} flexShrink={1} minWidth={0}>
           <Text dimColor wrap="truncate-end">
@@ -538,10 +568,9 @@ export const register: Register = on => {
 
   // ---------- the settings pane ----------
 
-  // While the person is in the Instructions field the pane holds its countdown (see `paneNowA`).
+  // Focus reaching one of the pane's controls holds the countdown (see `editUntilA`).
   on('ui.focus', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
-    if (e.plugin === 'cache-expiry-handoff' && e.element === 'args') await holdPane($)
-    else await update($, editUntilA, () => 0)
+    if (e.plugin === 'cache-expiry-handoff') await holdPane($)
     return next(e)
   })
 
@@ -551,7 +580,7 @@ export const register: Register = on => {
       read($, snapA),
       read($, runA),
       read($, logA),
-      read($, paneNowA),
+      read($, nowA),
       read($, skillsA),
       read($, expA),
     ])
@@ -660,12 +689,18 @@ export const register: Register = on => {
     const isWarm = s.mode === 'warm' || s.mode === 'warm-handoff'
     const isHandoff = s.mode === 'handoff' || s.mode === 'warm-handoff'
 
+    // A saved value that isn't one of the presets takes its place in order.
+    const byValue = (a: { value: string }, b: { value: string }) => Number(a.value) - Number(b.value)
     const leadOptions = [120, 180, 300, 600, 900].map(v => ({ value: String(v), label: `${fmtDuration(v)} before` }))
     if (!leadOptions.some(o => o.value === String(s.leadSec))) leadOptions.push({ value: String(s.leadSec), label: `${fmtDuration(s.leadSec)} before` })
-    const warmOptions = [15, 30, 60, 120, 240, 480, 1440].map(v => ({ value: String(v), label: fmtDuration(v * 60) }))
-    if (!warmOptions.some(o => o.value === String(s.warmForMin))) warmOptions.push({ value: String(s.warmForMin), label: fmtDuration(s.warmForMin * 60) })
+    leadOptions.sort(byValue)
+    const times = (n: number) => (n === 1 ? 'Once' : n === 2 ? 'Twice' : `${n} times`)
+    const repeatOptions = [1, 2, 3, 5, 10, 20].map(v => ({ value: String(v), label: times(v) }))
+    if (!repeatOptions.some(o => o.value === String(s.warmTimes))) repeatOptions.push({ value: String(s.warmTimes), label: times(s.warmTimes) })
+    repeatOptions.sort(byValue)
     const minOptions = [0, 10_000, 20_000, 50_000, 100_000].map(v => ({ value: String(v), label: v === 0 ? 'Off' : `${fmtTokens(v)} tokens` }))
     if (!minOptions.some(o => o.value === String(s.minTokens))) minOptions.push({ value: String(s.minTokens), label: `${fmtTokens(s.minTokens)} tokens` })
+    minOptions.sort(byValue)
     // A Select takes at most 64 options: handoff-like skills rank first, and the chosen one always stays.
     const shown = skills.slice(0, 64)
     const skillNames = shown.includes(s.skill) ? shown : [s.skill, ...shown.slice(0, 63)]
@@ -690,7 +725,7 @@ export const register: Register = on => {
         ? 'In use'
         : left <= 0
           ? `Expired ${fmtAgo(-left)}`
-          : `${fmtClock(left)} left`
+          : 'Warm'
     const tone = !hasData ? 'subtle' : isLive ? 'success' : left <= 0 ? 'error' : left <= lead ? 'warning' : 'success'
     const warmLabel = run.isActing ? 'Working…' : 'Warm now'
 
@@ -753,7 +788,7 @@ export const register: Register = on => {
               ),
             ),
             row('When', select('lead', leadOptions, String(s.leadSec), v => void setSettings($, { leadSec: Number(v) }))),
-            isWarm ? row('While away', select('warmFor', warmOptions, String(s.warmForMin), v => void setSettings($, { warmForMin: Number(v) }))) : null,
+            isWarm ? row('Repeat', select('repeat', repeatOptions, String(s.warmTimes), v => void setSettings($, { warmTimes: Number(v) }))) : null,
             isWarm ? row('After that', segmented('then', THEN, s.mode, (v: CacheMode) => void setSettings($, { mode: v }))) : null,
             s.mode !== 'notify' ? row('Skip below', select('min', minOptions, String(s.minTokens), v => void setSettings($, { minTokens: Number(v) }))) : null,
           ],
@@ -825,7 +860,7 @@ export const register: Register = on => {
 
 async function openPane($: $) {
   const now = await $.clock.now()
-  await Promise.all([refreshSkills($), refreshExperiment($), update($, editUntilA, () => 0), update($, paneNowA, () => now)])
+  await Promise.all([refreshSkills($), refreshExperiment($), update($, editUntilA, () => 0), update($, nowA, () => now)])
   await $.ui.open({ id: PANE, title: 'Prompt cache', focus: true, closeOnEscape: true, rows: 34, columns: 64 })
 }
 
