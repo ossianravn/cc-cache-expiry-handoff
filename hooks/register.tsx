@@ -60,6 +60,16 @@ const logA = atom({ plugin: 'cache-expiry-handoff', key: 'log' } as const, [], {
 const nowA = atom({ plugin: 'cache-expiry-handoff', key: 'now' } as const, 0)
 const skillsA = atom({ plugin: 'cache-expiry-handoff', key: 'skills' } as const, [])
 const expA = atom({ plugin: 'cache-expiry-handoff', key: 'exp' } as const, EMPTY_EXP)
+// The pane counts from its own clock, held while the person is in the Instructions field: a redraw every
+// second rebuilds the field on graphical surfaces and can take the focus out from under their typing.
+// Focus leaving the pane raises no event, so the hold lapses a minute after the last focus or keystroke.
+const paneNowA = atom({ plugin: 'cache-expiry-handoff', key: 'paneNow' } as const, 0)
+const editUntilA = atom({ plugin: 'cache-expiry-handoff', key: 'editUntil' } as const, 0)
+const EDIT_HOLD_MS = 60_000
+const holdPane = async ($: $) => {
+  const now = await $.clock.now()
+  await update($, editUntilA, () => now + EDIT_HOLD_MS)
+}
 
 // ---------- state helpers ----------
 
@@ -271,7 +281,12 @@ async function tick($: $) {
   void publish($)
   const now = await $.clock.now()
   // While a turn runs the band reads "in use"; skip the per-second redraw.
-  if (snap.lastAt > 0 && !run.isWorking) await update($, nowA, () => now)
+  // While the person types in the pane's Instructions field nothing redraws: on graphical surfaces a
+  // redraw of the band rebuilds the pane too, and the field loses the focus.
+  if (snap.lastAt > 0 && !run.isWorking && now >= (await read($, editUntilA))) {
+    await update($, nowA, () => now)
+    await update($, paneNowA, () => now)
+  }
   const action = decide(now, s, snap, run)
   const tokens = fmtTokens(prefixTokens(snap))
   switch (action.kind) {
@@ -432,8 +447,7 @@ export const register: Register = on => {
     switch (sub.toLowerCase()) {
       case '':
       case 'settings':
-        await Promise.all([refreshSkills($), refreshExperiment($)])
-        await $.ui.open({ id: PANE, title: 'Prompt cache', focus: true, closeOnEscape: true, rows: 30, columns: 64 })
+        await openPane($)
         return { text: await statusText($) }
       case 'warm':
         return { text: (await warmNow($, s, true)) ? 'Kept the prompt cache warm.' : 'Keep-warm failed; see /cache-expiry.' }
@@ -524,13 +538,20 @@ export const register: Register = on => {
 
   // ---------- the settings pane ----------
 
+  // While the person is in the Instructions field the pane holds its countdown (see `paneNowA`).
+  on('ui.focus', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
+    if (e.plugin === 'cache-expiry-handoff' && e.element === 'args') await holdPane($)
+    else await update($, editUntilA, () => 0)
+    return next(e)
+  })
+
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const [s, snap, run, logs, tickNow, skills, exp] = await Promise.all([
       read($, settingsA),
       read($, snapA),
       read($, runA),
       read($, logA),
-      read($, nowA),
+      read($, paneNowA),
       read($, skillsA),
       read($, expA),
     ])
@@ -546,7 +567,11 @@ export const register: Register = on => {
     const isLive = run.isWorking
     const hasData = snap.lastAt > 0
 
-    const set = (patch: Partial<CacheSettings>) => () => void setSettings($, patch)
+    const isTerminal = e.surface === 'terminal'
+    // Below this width a row's control no longer fits beside its label, so the label goes on top.
+    const isNarrow = width < 52
+    // Terminal rows sit tight so the pane fits inline above the prompt; graphical surfaces get air.
+    const rowGap = isTerminal ? 0 : 1
 
     const segmented = <T extends string>(key: string, options: readonly { value: T; label: string }[], value: T, pick: (v: T) => void) => (
       <Box flexDirection="row" flexWrap="wrap" columnGap={1} rowGap={0}>
@@ -555,37 +580,65 @@ export const register: Register = on => {
         ))}
       </Box>
     )
-    const onOff = (key: string, value: boolean, field: 'toast' | 'systemNotify' | 'guard') =>
+    const onOff = (key: string, value: boolean, field: 'toast' | 'systemNotify') =>
       segmented(key, [{ value: 'off', label: 'Off' }, { value: 'on', label: 'On' }] as const, value ? 'on' : 'off', v =>
         void setSettings($, { [field]: v === 'on' }),
       )
-    // Labels centre on their control; a hint sits under the control, not under the pair.
-    const labelWidth = e.surface === 'terminal' ? 18 : 13
-    const row = (label: string, control: RenderChildren, hint?: string) => (
-      <Box flexDirection="column">
-        <Box flexDirection="row" gap={2} alignItems="center">
-          <Box width={labelWidth} flexShrink={0}>
-            <Text dimColor>{label}</Text>
-          </Box>
-          <Box flexShrink={1}>{control}</Box>
-        </Box>
-        {hint ? (
-          <Box marginLeft={labelWidth + 2}>
-            <Text dimColor size="footnote">
-              {hint}
-            </Text>
-          </Box>
-        ) : null}
-      </Box>
-    )
     const select = (key: string, options: { value: string; label: string }[], value: string, pick: (v: string) => void) =>
       Select ? (
-        <Box width={Math.max(...options.map(o => o.label.length)) + 6}>
+        <Box width={Math.max(...options.map(o => o.label.length)) + 6} flexShrink={0}>
           <Select key={key} options={options} value={value} onSelect={pick} />
         </Box>
       ) : (
         <Text>{options.find(o => o.value === value)?.label ?? value}</Text>
       )
+
+    // A settings row: a fixed label column with the control right beside it; on a narrow pane the control sits under it.
+    // A text field (`fill`) takes the rest of the line and its label aligns with its first line.
+    const labelWidth = isTerminal ? 16 : 13
+    const row = (label: string, control: RenderChildren, fill = false) =>
+      isNarrow ? (
+        <Box flexDirection="column">
+          <Text>{label}</Text>
+          <Box flexDirection={fill ? 'column' : 'row'} alignItems={fill ? 'stretch' : undefined} minWidth={0}>
+            {control}
+          </Box>
+        </Box>
+      ) : (
+        <Box flexDirection="row" alignItems={fill ? 'flex-start' : 'center'} gap={2}>
+          <Box width={labelWidth} flexShrink={0}>
+            <Text>{label}</Text>
+          </Box>
+          <Box
+            flexDirection={fill ? 'column' : 'row'}
+            alignItems={fill ? 'stretch' : undefined}
+            flexGrow={fill ? 1 : 0}
+            flexShrink={1}
+            minWidth={0}
+          >
+            {control}
+          </Box>
+        </Box>
+      )
+    // A group: its title, its rows, then what the rows mean in plain sentences, one per line.
+    const sentence = (t: string) => (/[.!?]$/.test(t) ? t : `${t}.`)
+    const group = (title: string, rows: RenderChildren[], notes: (string | undefined)[]) => (
+      <Box flexDirection="column" gap={rowGap}>
+        <Text weight="semibold">{title}</Text>
+        {rows.filter(Boolean)}
+        {notes.some(Boolean) ? (
+          <Box flexDirection="column">
+            {notes
+              .filter((n): n is string => !!n)
+              .map(n => (
+                <Text dimColor size="footnote">
+                  {sentence(n)}
+                </Text>
+              ))}
+          </Box>
+        ) : null}
+      </Box>
+    )
 
     const isWarm = s.mode === 'warm' || s.mode === 'warm-handoff'
     const isHandoff = s.mode === 'handoff' || s.mode === 'warm-handoff'
@@ -622,139 +675,130 @@ export const register: Register = on => {
           ? `Expired ${fmtAgo(-left)}`
           : `${fmtClock(left)} left`
     const tone = !hasData ? 'subtle' : isLive ? 'success' : left <= 0 ? 'error' : left <= lead ? 'warning' : 'success'
-
-    // Terminal rows sit tight so the pane fits inline above the prompt; graphical surfaces get air.
-    const rowGap = e.surface === 'terminal' ? 0 : 1
     const warmLabel = run.isActing ? 'Working…' : 'Warm now'
 
     return (
-      <Box flexDirection="column" gap={1} width={width}>
-        <Box flexDirection="column">
-          <Box flexDirection="row" gap={1} alignItems="center">
-            <Text color={tone}>●</Text>
-            <Text size="heading" weight="semibold" tabular>
-              {status}
-            </Text>
+      <Box flexDirection="column" gap={isTerminal ? 1 : 2} width={width}>
+        <Box flexDirection="column" gap={rowGap}>
+          <Box flexDirection="column">
+            <Box flexDirection="row" gap={1} alignItems="center">
+              <Text color={tone}>●</Text>
+              <Text size="heading" weight="semibold" tabular>
+                {status}
+              </Text>
+            </Box>
+            {hasData ? (
+              <Text dimColor wrap="truncate-end">
+                {fmtTtl(ttl)} cache ({ttlSource(s, snap)}) · {Math.round(hitRate(snap) * 100)}% hit · {fmtTokens(prefixTokens(snap))} tokens
+              </Text>
+            ) : null}
+            {hasData ? (
+              <Text dimColor wrap="truncate-end">
+                Last reply {fmtAgo(now - snap.lastAt)} · {planText(s, snap, run, lead) || 'nothing scheduled'}
+              </Text>
+            ) : null}
           </Box>
-          {hasData ? (
-            <Text dimColor wrap="truncate-end">
-              {fmtTtl(ttl)} cache ({ttlSource(s, snap)}) · {Math.round(hitRate(snap) * 100)}% hit · {fmtTokens(prefixTokens(snap))} tokens
-            </Text>
-          ) : null}
-          {hasData ? (
-            <Text dimColor wrap="truncate-end">
-              Last reply {fmtAgo(now - snap.lastAt)} · {planText(s, snap, run, lead) || 'nothing scheduled'}
-            </Text>
-          ) : null}
-        </Box>
-
-        <Box flexDirection="column" gap={0}>
           <Box flexDirection="row" flexWrap="wrap" gap={1}>
             {hasData && left > 0 ? <Button key="warm-now" label={warmLabel} onPress={() => void warmNow($, s, true)} /> : null}
             <Button key="handoff-now" label={`Run /${s.skill}`} onPress={() => void handOffNow($, s)} />
             <Button key="pause" label={run.paused ? 'Resume' : 'Pause'} onPress={() => void patchRun($, { paused: !run.paused })} />
           </Box>
-          {logs.slice(0, 3).map((l: CacheLogEntry, i: number) => (
-            <Box flexDirection="row" gap={2}>
-              <Box width={9} flexShrink={0}>
-                <Text dimColor tabular>
-                  {fmtAgo(now - l.at)}
+          {logs.length > 0 || run.pings > 0 ? (
+            <Box flexDirection="column">
+              {logs.slice(0, 3).map((l: CacheLogEntry, i: number) => (
+                <Box flexDirection="row" gap={2}>
+                  <Box width={9} flexShrink={0}>
+                    <Text dimColor tabular size="footnote">
+                      {fmtAgo(now - l.at)}
+                    </Text>
+                  </Box>
+                  <Text color={l.kind === 'error' ? 'error' : undefined} dimColor={i > 0} size="footnote" wrap="truncate-end">
+                    {l.text}
+                  </Text>
+                </Box>
+              ))}
+              {run.pings > 0 ? (
+                <Text dimColor size="footnote" wrap="truncate-end">
+                  Kept warm {run.pings}× · {fmtTokens(run.pingRead)} cached tokens read ≈ {fmtTokens(Math.round(run.pingRead / 10))} at full price
                 </Text>
-              </Box>
-              <Text color={l.kind === 'error' ? 'error' : undefined} dimColor={i > 0} wrap="truncate-end">
-                {l.text}
-              </Text>
+              ) : null}
             </Box>
-          ))}
-          {run.pings > 0 ? (
-            <Text dimColor wrap="truncate-end">
-              Kept warm {run.pings}× · {fmtTokens(run.pingRead)} cached tokens read ≈ {fmtTokens(Math.round(run.pingRead / 10))} at full price
-            </Text>
           ) : null}
         </Box>
 
-        <Box flexDirection="column" gap={rowGap}>
-          <Text weight="semibold">Before it expires</Text>
-          {row(
-            'Action',
-            segmented('mode', ACTIONS, isWarm ? 'warm' : s.mode, (v: CacheMode) =>
-              void setSettings($, { mode: v === 'warm' && s.mode === 'warm-handoff' ? 'warm-handoff' : v }),
+        {group(
+          'Before it expires',
+          [
+            row(
+              'Action',
+              segmented('mode', ACTIONS, isWarm ? 'warm' : s.mode, (v: CacheMode) =>
+                void setSettings($, { mode: v === 'warm' && s.mode === 'warm-handoff' ? 'warm-handoff' : v }),
+              ),
             ),
-          )}
-          {row(
-            'When',
-            select('lead', leadOptions, String(s.leadSec), v => void setSettings($, { leadSec: Number(v) })),
-            notes.when,
-          )}
-          {isWarm
-            ? row(
-                'While away',
-                select('warmFor', warmOptions, String(s.warmForMin), v => void setSettings($, { warmForMin: Number(v) })),
-                notes.away,
-              )
-            : null}
-          {isWarm
-            ? row(
-                'After that',
-                segmented('then', THEN, s.mode, (v: CacheMode) => void setSettings($, { mode: v })),
-                notes.then,
-              )
-            : null}
-          {isHandoff
-            ? row(
-                'Handoff skill',
-                select('skill', skillOptions, s.skill, v => void setSettings($, { skill: v })),
-                isSkillMissing ? `No /${s.skill} in this session.` : undefined,
-              )
-            : null}
-          {isHandoff && Input
-            ? row(
-                'Instructions',
-                <Input key="args" value={s.skillArgs} placeholder="Arguments for the skill" rows={2} submitLabel="save" onSubmit={v => void setSettings($, { skillArgs: v })} />,
-              )
-            : null}
-          {isHandoff
-            ? row(
-                'After handoff',
-                segmented('after', [{ value: 'stay', label: 'Keep session' }, { value: 'clear', label: 'Clear session' }] as const, s.afterHandoff, v =>
-                  void setSettings($, { afterHandoff: v }),
-                ),
-                notes.afterHandoff,
-              )
-            : null}
-          {s.mode !== 'notify'
-            ? row(
-                'Skip below',
-                select('min', minOptions, String(s.minTokens), v => void setSettings($, { minTokens: Number(v) })),
-                notes.skip,
-              )
-            : null}
-        </Box>
+            row('When', select('lead', leadOptions, String(s.leadSec), v => void setSettings($, { leadSec: Number(v) }))),
+            isWarm ? row('While away', select('warmFor', warmOptions, String(s.warmForMin), v => void setSettings($, { warmForMin: Number(v) }))) : null,
+            isWarm ? row('After that', segmented('then', THEN, s.mode, (v: CacheMode) => void setSettings($, { mode: v }))) : null,
+            s.mode !== 'notify' ? row('Skip below', select('min', minOptions, String(s.minTokens), v => void setSettings($, { minTokens: Number(v) }))) : null,
+          ],
+          [notes.when, notes.away, notes.then, notes.skip],
+        )}
 
-        <Box flexDirection="column" gap={rowGap}>
-          <Text weight="semibold">Cache</Text>
-          {row(
-            'Lifetime',
-            segmented('ttl', ttlOptions, s.ttl, (v: CacheTtlChoice) => void setSettings($, { ttl: v })),
-            s.ttl === 'auto' ? `Detected: ${fmtTtl(snap.autoTtlMs)} (${snap.autoTtlSource})` : undefined,
-          )}
-          {row('Toasts', onOff('toast', s.toast, 'toast'))}
-          {row('System alerts', onOff('system', s.systemNotify, 'systemNotify'))}
-          {row(
-            'After expiry',
-            segmented('guard', [{ value: 'send', label: 'Just send' }, { value: 'ask', label: 'Ask first' }] as const, s.guard ? 'ask' : 'send', v =>
-              void setSettings($, { guard: v === 'ask' }),
+        {isHandoff
+          ? group(
+              'Handoff',
+              [
+                row('Skill', select('skill', skillOptions, s.skill, v => void setSettings($, { skill: v }))),
+                row(
+                  'Afterwards',
+                  segmented('after', [{ value: 'stay', label: 'Keep session' }, { value: 'clear', label: 'Clear session' }] as const, s.afterHandoff, v =>
+                    void setSettings($, { afterHandoff: v }),
+                  ),
+                ),
+                Input
+                  ? row(
+                      'Instructions',
+                      <Input
+                        key="args"
+                        value={s.skillArgs}
+                        placeholder={`What /${s.skill} should do`}
+                        rows={5}
+                        submitLabel="Save"
+                        onInput={() => void holdPane($)}
+                        onSubmit={v => void setSettings($, { skillArgs: v })}
+                      />,
+                      true,
+                    )
+                  : null,
+              ],
+              [isSkillMissing ? `No /${s.skill} in this session` : undefined, notes.afterHandoff],
+            )
+          : null}
+
+        {group(
+          'Cache',
+          [
+            row('Lifetime', segmented('ttl', ttlOptions, s.ttl, (v: CacheTtlChoice) => void setSettings($, { ttl: v }))),
+            row(
+              'After expiry',
+              segmented('guard', [{ value: 'send', label: 'Just send' }, { value: 'ask', label: 'Ask first' }] as const, s.guard ? 'ask' : 'send', v =>
+                void setSettings($, { guard: v === 'ask' }),
+              ),
             ),
+            row('Toasts', onOff('toast', s.toast, 'toast')),
+            row('System alerts', onOff('system', s.systemNotify, 'systemNotify')),
+            row(
+              'Experiment',
+              <Text key="exp" tabular dimColor={expRow.value === 'Unknown'}>
+                {expRow.value}
+              </Text>,
+            ),
+          ],
+          [
+            s.ttl === 'auto' ? `Detected: ${fmtTtl(snap.autoTtlMs)} (${snap.autoTtlSource})` : undefined,
             notes.cold,
-          )}
-          {row(
-            'Experiment',
-            <Text key="exp" tabular dimColor={expRow.value === 'Unknown'}>
-              {expRow.value}
-            </Text>,
-            expRow.note,
-          )}
-        </Box>
+            `Experiment: ${expRow.note}`,
+          ],
+        )}
       </Box>
     )
   })
@@ -763,8 +807,9 @@ export const register: Register = on => {
 // ---------- shared view helpers ----------
 
 async function openPane($: $) {
-  await Promise.all([refreshSkills($), refreshExperiment($)])
-  await $.ui.open({ id: PANE, title: 'Prompt cache', focus: true, closeOnEscape: true, rows: 30, columns: 64 })
+  const now = await $.clock.now()
+  await Promise.all([refreshSkills($), refreshExperiment($), update($, editUntilA, () => 0), update($, paneNowA, () => now)])
+  await $.ui.open({ id: PANE, title: 'Prompt cache', focus: true, closeOnEscape: true, rows: 34, columns: 64 })
 }
 
 function planText(s: CacheSettings, snap: CacheSnapshot, run: CacheRun, lead: number): string {

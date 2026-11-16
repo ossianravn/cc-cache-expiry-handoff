@@ -128,6 +128,7 @@ const STORED: Record<string, unknown> = {
   run: { shape: 'run-1', value: run() },
   settings: { shape: 'settings-1', value: DEFAULT_SETTINGS },
   now: NOW + 2 * MIN,
+  paneNow: NOW + 2 * MIN,
   exp: { state: 'active', id: '34e', model: 'claude-opus-5-5', updatedAt: NOW, firstSeenAt: NOW },
 }
 
@@ -229,9 +230,9 @@ test('the settings pane draws every mode on terminal and desktop', async ($, on)
       expect(await ui.find({ type: 'Text', text: /^3:00 left$/ })).toBeDefined()
       if (m !== 'notify') expect(await ui.find({ key: 'min' })).toBeDefined()
       if (m === 'handoff') expect(await ui.find({ key: 'skill' })).toBeDefined()
-      if (m === 'warm') expect(await ui.find({ type: 'Text', text: /^Keeps warm in 1 min$/ })).toBeDefined()
+      if (m === 'warm') expect(await ui.find({ type: 'Text', text: /^Keeps warm in 1 min\.$/ })).toBeDefined()
       expect(await ui.find({ type: 'Text', text: /^34e$/ })).toBeDefined()
-      expect(await ui.find({ type: 'Text', text: /^Opus 5\.5 · first seen / })).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: /^Experiment: Opus 5\.5 · first seen / })).toBeDefined()
       await ui.unmount()
     }
   }

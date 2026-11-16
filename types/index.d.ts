@@ -125,6 +125,10 @@ declare module 'claude-code' {
       now: number
       skills: string[]
       exp: CacheExperiment
+      /** The time the pane counts from: the tick's `now`, held while the person types in the pane. */
+      paneNow: number
+      /** Until when the pane holds its clock: focus or typing in the Instructions field sets it a minute ahead. */
+      editUntil: number
     }
   }
 }
