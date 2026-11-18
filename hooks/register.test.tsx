@@ -11,6 +11,7 @@ import {
   experimentRow,
   fmtModel,
   inferTtl,
+  isMissedExpiry,
   leadMs,
   liveRecord,
   nextAction,
@@ -55,6 +56,36 @@ describe('companion status', () => {
 })
 
 describe('decide', () => {
+  test('tells an expiry missed while Claude Code was not running from a late one', async () => {
+    const due = NOW + TTL_1H
+    expect(isMissedExpiry(due + 500, due, due - 500)).toBe(false) // seen on time
+    expect(isMissedExpiry(due + 80 * MIN, due, 0)).toBe(true) // first tick after a restart
+    expect(isMissedExpiry(due + 80 * MIN, due, due - 30 * MIN)).toBe(true) // ticker paused by sleep
+    expect(isMissedExpiry(due + 80 * MIN, due, due + 80 * MIN - 1000)).toBe(false) // a turn waited on the person
+  })
+
+  test('mid-turn acts only between requests: keep-warm always, notice and handoff while a question waits', async () => {
+    const due = NOW + TTL_5M - 1000
+    const warm = { ...DEFAULT_SETTINGS, mode: 'warm-handoff' as const, warmTimes: 1 }
+    const tool = run({ isWorking: true, toolsOut: 1 })
+    const question = run({ isWorking: true, toolsOut: 1, questionsOut: 1 })
+    expect(decide(due, warm, snap(), run({ isWorking: true })).kind).toBe('none') // a request is out
+    expect(decide(due, warm, snap(), tool).kind).toBe('warm')
+    expect(decide(due, warm, snap(), { ...tool, awayPings: 1 }).kind).toBe('none') // no handoff while a tool runs
+    expect(decide(due, warm, snap(), { ...question, awayPings: 1 }).kind).toBe('handoff')
+    expect(decide(due, DEFAULT_SETTINGS, snap(), question).kind).toBe('notify')
+    expect(decide(NOW + TTL_5M + 1000, warm, snap(), tool).kind).toBe('expired')
+    // A declined question re-arms, but sends no request: nothing to keep warm until one comes.
+    expect(decide(due, warm, snap(), run({ activeSince: NOW + 1000 })).kind).toBe('none')
+  })
+
+  test('a waiting question counts down like an idle session', async () => {
+    const question = run({ isWorking: true, toolsOut: 1, questionsOut: 1 })
+    expect(nextAction(DEFAULT_SETTINGS, snap(), question)).not.toBe(null)
+    expect(nextAction(DEFAULT_SETTINGS, snap(), run({ isWorking: true, toolsOut: 1 }))).toBe(null)
+    expect(liveRecord(DEFAULT_SETTINGS, snap(), question, { sessionId: 'x', cwd: '', orcaPane: '', entrypoint: '' }).working).toBe(false)
+  })
+
   test('does nothing until the lead time', async () => {
     expect(decide(NOW + 2 * MIN, DEFAULT_SETTINGS, snap(), run()).kind).toBe('none')
   })
@@ -170,9 +201,10 @@ describe('experiment', () => {
     expect(fmtModel('claude-fable-5-2')).toBe('Fable 5.2')
     expect(experimentRow(NOW + 3 * TTL_1H, { state: 'none', id: '', model: 'claude-opus-5-5', updatedAt: NOW, firstSeenAt: 0 })).toEqual({
       value: 'None',
-      note: 'Opus 5.5 · updated 3h 0m ago',
+      note: 'none for Opus 5.5 · updated 3h 0m ago',
     })
     expect(experimentRow(NOW, { state: 'unknown', id: '', model: '', updatedAt: 0, firstSeenAt: 0 }).value).toBe('Unknown')
+    expect(experimentRow(NOW, { state: 'none', id: '', model: 'claude-opus-5-5', updatedAt: 0, firstSeenAt: 0 }).note).toBe('none for Opus 5.5')
   })
 })
 
@@ -233,7 +265,7 @@ test('the settings pane draws every mode on terminal and desktop', async ($, on)
       if (m === 'handoff') expect(await ui.find({ key: 'skill' })).toBeDefined()
       if (m === 'warm') expect(await ui.find({ type: 'Text', text: /^Keeps warm in 1 min\.$/ })).toBeDefined()
       expect(await ui.find({ type: 'Text', text: /^34e$/ })).toBeDefined()
-      expect(await ui.find({ type: 'Text', text: /^Experiment: Opus 5\.5 · first seen / })).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: /^Experiment: 34e for Opus 5\.5 · first seen / })).toBeDefined()
       await ui.unmount()
     }
   }

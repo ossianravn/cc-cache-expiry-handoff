@@ -186,13 +186,43 @@ export type Action =
   | { kind: 'handoff' }
   | { kind: 'notify'; reason?: string }
 
-/** What to do now. Runs every second; only one action per armed idle stretch, except keep-warm. */
+/** Tools that wait for the person's answer: a question put to them, a plan to approve. */
+export const PERSON_TOOLS: readonly string[] = ['AskUserQuestion', 'ExitPlanMode']
+
+/**
+ * A turn runs but its model has no request out: a tool runs, or a permission
+ * prompt or question waits. The cache counts down from the last request as when idle.
+ */
+export function isBetweenRequests(run: CacheRun): boolean {
+  return run.isWorking && (run.toolsOut ?? 0) > 0
+}
+
+/** A turn waits for the person to answer a question or approve a plan. */
+export function isWaitingOnPerson(run: CacheRun): boolean {
+  return run.isWorking && (run.questionsOut ?? 0) > 0
+}
+
+/**
+ * What to do now. Runs every second; only one action per armed idle stretch, except keep-warm.
+ *
+ * Mid-turn only between requests: a keep-warm always, while a question waits also
+ * a notice or the handoff (which ends the question's turn first). A notice or handoff
+ * while a tool runs would ask nothing of the person and could not run, so none.
+ */
 export function decide(now: number, s: CacheSettings, snap: CacheSnapshot, run: CacheRun): Action {
-  if (snap.lastAt === 0 || run.paused || run.isWorking || run.isActing) return { kind: 'none' }
+  if (run.isWorking && !isBetweenRequests(run)) return { kind: 'none' }
+  const action = decideIdle(now, s, snap, run)
+  if (!run.isWorking || action.kind === 'none' || action.kind === 'expired' || action.kind === 'warm') return action
+  return isWaitingOnPerson(run) ? action : { kind: 'none' }
+}
+
+function decideIdle(now: number, s: CacheSettings, snap: CacheSnapshot, run: CacheRun): Action {
+  if (snap.lastAt === 0 || run.paused || run.isActing) return { kind: 'none' }
   const ttl = ttlMs(s, snap)
   const left = snap.lastAt + ttl - now
   if (left <= 0) return run.expiredFor === snap.lastAt ? { kind: 'none' } : { kind: 'expired' }
-  if (!run.armed || left > leadMs(s, ttl)) return { kind: 'none' }
+  // Act only on a request since the person's last message or answer: one they declined sends none.
+  if (!run.armed || left > leadMs(s, ttl) || snap.lastAt < run.activeSince) return { kind: 'none' }
 
   const isSmall = prefixTokens(snap) < s.minTokens
   const mode = s.mode
@@ -221,9 +251,22 @@ export type Schedule = {
   thenIn: number
 }
 
-/** Armed, idle and counting from a reply: mid-turn the last request predates the message. */
+/**
+ * Whether the cache expired while Claude Code wasn't running (the app quit, Windows restarted, the
+ * computer slept): seen well after it was due, with no tick of the every-second ticker since then.
+ * A late expiry with ticks in between, such as a turn waiting on the person, is an ordinary one.
+ */
+export function isMissedExpiry(now: number, expiredAt: number, prevTickAt: number): boolean {
+  return now - expiredAt > MIN && prevTickAt < expiredAt
+}
+
+/**
+ * Armed, idle (or waiting on the person's answer) and counting from a reply:
+ * mid-turn the last request predates the message.
+ */
 export function isArmedIdle(snap: CacheSnapshot, run: CacheRun): boolean {
-  return snap.lastAt > 0 && run.armed && !run.paused && !run.isWorking && snap.lastAt >= run.activeSince
+  const isIdle = !run.isWorking || isWaitingOnPerson(run)
+  return snap.lastAt > 0 && run.armed && !run.paused && isIdle && snap.lastAt >= run.activeSince
 }
 
 export function schedule(now: number, s: CacheSettings, snap: CacheSnapshot, run: CacheRun): Schedule {
@@ -275,7 +318,7 @@ export function liveRecord(
     next: nextAction(s, snap, run),
     phase: run.phase,
     paused: run.paused,
-    working: run.isWorking,
+    working: run.isWorking && !isWaitingOnPerson(run),
     pings: run.pings,
   }
 }
@@ -396,13 +439,14 @@ export function fmtDay(ms: number): string {
 /** The Experiment row: its value and the line under it. */
 export function experimentRow(now: number, exp: CacheExperiment): { value: string; note: string } {
   const model = exp.model ? fmtModel(exp.model) : 'this model'
+  // The note states the value too: it is read on its own, under the group.
   if (exp.state === 'active') {
-    return { value: exp.id, note: `${model} · first seen ${fmtDay(exp.firstSeenAt || exp.updatedAt)}` }
+    return { value: exp.id, note: `${exp.id} for ${model} · first seen ${fmtDay(exp.firstSeenAt || exp.updatedAt)}` }
   }
   if (exp.state === 'none') {
-    return { value: 'None', note: exp.updatedAt > 0 ? `${model} · updated ${fmtAgo(now - exp.updatedAt)}` : model }
+    return { value: 'None', note: `none for ${model}${exp.updatedAt > 0 ? ` · updated ${fmtAgo(now - exp.updatedAt)}` : ''}` }
   }
-  return { value: 'Unknown', note: exp.model ? `Nothing cached for ${model}` : 'Shown after the first reply' }
+  return { value: 'Unknown', note: exp.model ? `unknown, nothing cached for ${model}` : 'unknown until the first reply' }
 }
 
 // ---------- formatting ----------

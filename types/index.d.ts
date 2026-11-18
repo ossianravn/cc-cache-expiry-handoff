@@ -50,6 +50,10 @@ export type CacheRun = {
   awayPings?: number
   pingRead: number
   isWorking: boolean
+  /** Main-thread tool calls in flight (running, or waiting on a permission prompt or the person). */
+  toolsOut?: number
+  /** Of those, questions and plans waiting for the person's answer (`PERSON_TOOLS`). */
+  questionsOut?: number
   isActing: boolean
   paused: boolean
   /** The `lastAt` an expiry was already reported for. */

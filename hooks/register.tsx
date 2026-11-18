@@ -15,6 +15,9 @@ import {
   experimentRow,
   explicitTtl,
   fmtAgo,
+  isMissedExpiry,
+  isWaitingOnPerson,
+  PERSON_TOOLS,
   fmtClock,
   fmtDuration,
   fmtSpan,
@@ -92,9 +95,9 @@ async function isPaneInUse($: $, now: number): Promise<boolean> {
 
 const patchRun = ($: $, patch: Partial<CacheRun>) => update($, runA, r => ({ ...r, ...patch }))
 
-async function log($: $, kind: CacheLogKind, text: string) {
-  const at = await $.clock.now()
-  await update($, logA, list => pushLog(list, { at, kind, text }))
+async function log($: $, kind: CacheLogKind, text: string, at?: number) {
+  const when = at ?? (await $.clock.now())
+  await update($, logA, list => pushLog(list, { at: when, kind, text }))
 }
 
 // The snapshot is also kept in the store under the session id, so a reload or a
@@ -232,8 +235,10 @@ async function warmNow($: $, s: CacheSettings, isManual = false) {
   try {
     const r = await $.model.fork({ prompt: PING_PROMPT })
     const at = await $.clock.now()
-    if (r.isAnswered && r.usage.cache_read_input_tokens > 0) {
-      const readTokens = r.usage.cache_read_input_tokens
+    // The read is what keeps the cache warm, text or not: mid-turn the fork may answer with a (denied) tool call.
+    const usage = r.isAnswered || r.reason === 'empty-reply' ? r.usage : undefined
+    const readTokens = usage?.cache_read_input_tokens ?? 0
+    if (usage && readTokens > 0) {
       await setSnap($, v => ({ ...v, lastAt: at }))
       // A manual keep-warm doesn't use up the ones Repeat allows while the person is away.
       await update($, runA, (v): CacheRun => ({
@@ -243,12 +248,12 @@ async function warmNow($: $, s: CacheSettings, isManual = false) {
         pingRead: v.pingRead + readTokens,
         phase: 'warming',
       }))
-      const wrote = r.usage.cache_creation_input_tokens
+      const wrote = usage.cache_creation_input_tokens
       await log($, 'warm', `Kept warm · read ${fmtTokens(readTokens)}${wrote > 1000 ? ` · wrote ${fmtTokens(wrote)}` : ''}`)
       if (isManual) $.ui.toast(`Cache kept warm: ${fmtTokens(readTokens)} tokens, timer reset`)
       return true
     }
-    const why = r.isAnswered ? 'the cache had already lapsed' : r.reason.replace(/-/g, ' ')
+    const why = usage ? 'the cache had already lapsed' : r.isAnswered ? '' : r.reason.replace(/-/g, ' ')
     await log($, 'error', `Keep-warm failed: ${why}`)
     await patchRun($, { armed: false, phase: 'stopped' })
     await alert($, s, `Couldn't keep the prompt cache warm (${why}).`)
@@ -259,9 +264,17 @@ async function warmNow($: $, s: CacheSettings, isManual = false) {
 }
 
 async function handOffNow($: $, s: CacheSettings) {
+  const wasWaiting = isWaitingOnPerson(await read($, runA))
   await patchRun($, { isActing: true, armed: false })
   try {
     if (s.toast) $.ui.toast(`Cache expires soon: running /${s.skill}`)
+    // A question waiting on the person holds the turn, and the skill runs only once the session is idle:
+    // end that turn first. The question stays in the transcript, so the handoff can carry it.
+    if (wasWaiting && mainTurnId) {
+      await $.turn.abort({ turnId: mainTurnId })
+      await log($, 'handoff', 'Ended the turn that waited on your answer')
+      for (let i = 0; i < 20 && (await read($, runA)).isWorking; i++) await $.clock.sleep(500)
+    }
     await patchRun($, { handoffPending: true })
     await $.command.run({ command: s.skill, args: s.skillArgs })
     await patchRun($, { phase: 'handed-off' })
@@ -300,14 +313,19 @@ async function afterHandoffTurn($: $, isAborted: boolean) {
   })
 }
 
+/** When the ticker last ran; 0 until it runs in this process. */
+let lastTickAt = 0
+
 async function tick($: $) {
   const [s, snap, run] = await Promise.all([read($, settingsA), read($, snapA), read($, runA)])
   void publish($)
   const now = await $.clock.now()
+  const prevTickAt = lastTickAt
+  lastTickAt = now
   // The band's seconds tick in its countdown region (countdown.tsx); the hooks module redraws only when a
   // minute turns or the band changes colour. While a turn runs the band reads "in use", and while the pane
   // is in use it holds (see `editUntilA`): either way, skip even those.
-  if (snap.lastAt > 0 && !run.isWorking && !(await isPaneInUse($, now))) {
+  if (snap.lastAt > 0 && (!run.isWorking || isWaitingOnPerson(run)) && !(await isPaneInUse($, now))) {
     const drawn = await read($, nowA)
     if (clockStep(now, s, snap) !== clockStep(drawn, s, snap)) await update($, nowA, () => now)
   }
@@ -316,18 +334,34 @@ async function tick($: $) {
   switch (action.kind) {
     case 'none':
       return
-    case 'expired':
+    case 'expired': {
       await patchRun($, { expiredFor: snap.lastAt, armed: false, phase: run.phase === 'handed-off' ? 'handed-off' : 'idle' })
-      await log($, 'expired', `Cache expired · ${tokens} tokens`)
-      if (s.toast && run.phase !== 'handed-off') $.ui.toast(`Prompt cache expired: the next message rewrites ${tokens} tokens`)
+      // Expired while Claude Code wasn't running, no action could run: say so, at the real time.
+      const expiredAt = snap.lastAt + ttlMs(s, snap)
+      const isMissed = isMissedExpiry(now, expiredAt, prevTickAt)
+      if (isMissed) {
+        await log($, 'expired', `Cache expired while Claude Code wasn't running · ${tokens} tokens`, expiredAt)
+      } else {
+        await log($, 'expired', `Cache expired · ${tokens} tokens`)
+      }
+      if (s.toast && run.phase !== 'handed-off') {
+        $.ui.toast(
+          isMissed
+            ? `Prompt cache expired ${fmtAgo(now - expiredAt)}, while Claude Code wasn't running: the next message rewrites ${tokens} tokens`
+            : `Prompt cache expired: the next message rewrites ${tokens} tokens`,
+        )
+      }
       return
+    }
     case 'notify': {
       await patchRun($, { armed: false, phase: 'notified' })
       const left = fmtClock(remainingMs(now, s, snap))
       const why =
         action.reason === 'budget' ? ` Kept warm ${s.warmTimes === 1 ? 'once' : `${s.warmTimes} times`}.` : ''
       await log($, 'notify', `Notified · ${left} left${why ? ' · keep-warm budget used' : ''}`)
-      await alert($, s, `Prompt cache expires in ${left}: send a message to keep ${tokens} tokens cached.${why}`)
+      // While a question waits, answering it is what sends the next request.
+      const keep = isWaitingOnPerson(run) ? "answer Claude's question" : 'send a message'
+      await alert($, s, `Prompt cache expires in ${left}: ${keep} to keep ${tokens} tokens cached.${why}`)
       return
     }
     case 'warm':
@@ -342,6 +376,8 @@ async function tick($: $) {
 // ---------- the module ----------
 
 let ticker: Timer | undefined
+/** The main loop's running turn, as its `turn.start` named it; '' between turns. */
+let mainTurnId = ''
 let explicit: ExplicitTtl
 let usesApiBilling = false
 
@@ -350,7 +386,7 @@ export const register: Register = on => {
     sessionId = await $.session.id()
     await restoreSnap($)
     // A reload mid-turn or mid-action must not leave actions blocked.
-    await patchRun($, { isWorking: false, isActing: false })
+    await patchRun($, { isWorking: false, isActing: false, toolsOut: 0, questionsOut: 0 })
     const stored = await $.store.get('settings')
     await update($, settingsA, () => normalizeSettings(stored))
     explicit = explicitTtl({
@@ -428,13 +464,39 @@ export const register: Register = on => {
   })
 
   on('turn.start', async ($, e, next) => {
-    if (e.agentId === undefined) await patchRun($, { isWorking: true })
+    if (e.agentId === undefined) {
+      mainTurnId = e.turnId
+      await patchRun($, { isWorking: true, toolsOut: 0, questionsOut: 0 })
+    }
     return next(e)
+  })
+
+  // A main-thread tool call in flight means no request is out: the cache counts down from the last one,
+  // and a keep-warm can run. A question or plan waiting on the person also lets the band count down.
+  on('tool.call', async ($, e, next) => {
+    if (e.agentId !== undefined) return next(e)
+    const isQuestion = PERSON_TOOLS.includes(e.tool)
+    await update($, runA, (v): CacheRun => ({
+      ...v,
+      toolsOut: (v.toolsOut ?? 0) + 1,
+      questionsOut: (v.questionsOut ?? 0) + (isQuestion ? 1 : 0),
+    }))
+    try {
+      return await next(e)
+    } finally {
+      const now = await $.clock.now()
+      await update($, runA, (v): CacheRun => {
+        const out = { ...v, toolsOut: Math.max(0, (v.toolsOut ?? 0) - 1), questionsOut: Math.max(0, (v.questionsOut ?? 0) - (isQuestion ? 1 : 0)) }
+        // An answer is the person back, as a message is (unless the handoff ended the question).
+        return isQuestion && !v.isActing && !v.handoffPending ? { ...out, armed: true, activeSince: now, awayPings: 0, phase: 'idle' } : out
+      })
+    }
   })
 
   on('turn.complete', async ($, e, next) => {
     if (e.agentId === undefined) {
-      await patchRun($, { isWorking: false })
+      mainTurnId = ''
+      await patchRun($, { isWorking: false, toolsOut: 0, questionsOut: 0 })
       await afterHandoffTurn($, e.isAborted)
       void refreshExperiment($)
     }
@@ -511,7 +573,8 @@ export const register: Register = on => {
     const ttl = ttlMs(s, snap)
     const left = remainingMs(now, s, snap)
     const lead = leadMs(s, ttl)
-    const isLive = e.props.isWorking || run.isWorking
+    // A question waiting on the person counts down as an idle session does.
+    const isLive = (e.props.isWorking || run.isWorking) && !isWaitingOnPerson(run)
     const isCold = !isLive && left <= 0
     const tone = run.paused ? 'subtle' : isCold ? 'error' : !isLive && left <= lead ? 'warning' : 'success'
     const fill = isLive ? 1 : Math.max(0, Math.min(1, left / ttl))
@@ -593,7 +656,7 @@ export const register: Register = on => {
     const ttl = ttlMs(s, snap)
     const lead = leadMs(s, ttl)
     const left = remainingMs(now, s, snap)
-    const isLive = run.isWorking
+    const isLive = run.isWorking && !isWaitingOnPerson(run)
     const hasData = snap.lastAt > 0
 
     const isTerminal = e.surface === 'terminal'
